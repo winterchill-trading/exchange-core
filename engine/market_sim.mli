@@ -22,7 +22,7 @@ module Config : sig
     { seed : int
     ; symbols : Symbol.t list (** instruments to trade; empty means all of them *)
     ; initial_prices : (Symbol.t * Price.t) list
-    (** starting reference prices; BTC 100000, ETH 3500, SOL 150, else 100 *)
+    (** starting reference prices by symbol; unlisted symbols start at [default_price] *)
     ; vol_bps : float (** standard deviation of the reference price over 1s, in bps *)
     ; noise_traders : int
     ; trader_balance : Usd.t (** deposited into each noise trader at creation *)
@@ -32,14 +32,26 @@ module Config : sig
     ; cancel_probability : float
     ; market_probability : float
     ; max_offset_bps : float (** limit orders rest up to this far from the reference *)
-    ; min_notional : float (** USD size range of an order *)
+    ; min_notional : float
+    (** USD size range of an order. Per instrument, both bounds are scaled up by the same
+        factor when one lot at the price is worth more than [min_notional], and a size
+        never rounds below one lot. *)
     ; max_notional : float
     }
   [@@deriving sexp_of]
 
-  (** Seed 0, all instruments, 5 bps/s, 10 traders with $10M each, 100ms ticks, up to 5
-      orders per instrument per trader, probabilities 0.3 / 0.1 / 0.02, offsets up to 25
-      bps, $20 to $2000 per order. *)
+  (** A plausible starting price, recognising the base asset by prefix (case insensitive):
+      BTC 100000, ETH 3500, SOL 150, anything else 100. ["BTC"], ["BTCUSDT"] and
+      ["BTC-PERP"] all get the BTC price. *)
+  val default_price : Symbol.t -> Price.t
+
+  (** [default_price] for each symbol, for [initial_prices]. *)
+  val default_prices : Symbol.t list -> (Symbol.t * Price.t) list
+
+  (** Seed 0, all instruments, [default_prices] of {!Exchange.Config.default_instruments},
+      5 bps/s, 10 traders with $10M each, 100ms ticks, up to 5 orders per instrument per
+      trader, probabilities 0.3 / 0.1 / 0.02, offsets up to 25 bps, $20 to $2000 per
+      order. *)
   val default : t
 end
 

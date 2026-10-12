@@ -20,13 +20,23 @@ module Config = struct
     }
   [@@deriving sexp_of]
 
+  let default_price symbol =
+    let name = String.uppercase (Symbol.to_string symbol) in
+    List.find_map
+      [ "BTC", 100_000; "ETH", 3_500; "SOL", 150 ]
+      ~f:(fun (prefix, px) -> Option.some_if (String.is_prefix name ~prefix) px)
+    |> Option.value ~default:100
+    |> Price.of_int
+  ;;
+
+  let default_prices symbols = List.map symbols ~f:(fun s -> s, default_price s)
+
   let default =
     { seed = 0
     ; symbols = []
     ; initial_prices =
-        List.map
-          [ "BTC", "100000"; "ETH", "3500"; "SOL", "150" ]
-          ~f:(fun (s, p) -> Symbol.of_string s, Price.of_string p)
+        default_prices
+          (List.map Exchange.Config.default_instruments ~f:(fun i -> i.symbol))
     ; vol_bps = 5.
     ; noise_traders = 10
     ; trader_balance = Usd.of_int 10_000_000
@@ -76,7 +86,8 @@ let create (config : Config.t) exchange =
       | Some instrument ->
         let reference =
           List.Assoc.find config.initial_prices symbol ~equal:Symbol.equal
-          |> Option.value_map ~f:Price.to_float ~default:100.
+          |> Option.value_or_thunk ~default:(fun () -> Config.default_price symbol)
+          |> Price.to_float
         in
         { Market.instrument; reference }
       | None -> raise_s [%message "Market_sim: unknown symbol" (symbol : Symbol.t)])
@@ -111,10 +122,24 @@ let gaussian t =
   Float.sqrt (-2. *. Float.log u1) *. Float.cos (2. *. Float.pi *. u2)
 ;;
 
-(* A size worth a random notional at [px], rounded down to the lot size. *)
+(* A size worth a random notional at [px], rounded down to the lot size but at least one
+   lot. The notional range is scaled up so that its lower end buys at least one lot,
+   otherwise coarse lots (e.g. 0.001 BTC) would round most orders to zero. *)
 let random_size t (m : Market.t) ~px =
-  let notional = uniform t t.config.min_notional t.config.max_notional in
-  Size.round_down (Size.of_float (notional /. px)) ~decimals:m.instrument.size_decimals
+  let lot = Instrument.lot_size m.instrument in
+  let scale =
+    if Float.(t.config.min_notional > 0.)
+    then Float.max 1. (Size.to_float lot *. px /. t.config.min_notional)
+    else 1.
+  in
+  let notional =
+    uniform t (t.config.min_notional *. scale) (t.config.max_notional *. scale)
+  in
+  Size.max
+    lot
+    (Size.round_down
+       (Size.of_float (notional /. px))
+       ~decimals:m.instrument.size_decimals)
 ;;
 
 let cancel_oldest t trader (m : Market.t) =
