@@ -5,8 +5,9 @@
 
     Events must be applied in sequence order without gaps, starting at the sequence number
     given to {!create}; anything else is an error, as is an event that does not fit the
-    rebuilt book (a fill or cancel of an unknown order, an accepted order that would
-    cross). *)
+    rebuilt book (a fill of an unknown maker, an accepted order that would cross). A
+    cancel of an order that is not on the book is ignored: IOC and market remainders are
+    cancelled without ever resting. *)
 
 open! Core
 open! Exchange_core
