@@ -27,3 +27,5 @@ jobs:
       - run: opam pin add exchange-core . --yes
       - run: opam exec -- dune build --only-packages exchange-core-engine @install
       - run: opam exec -- dune build --only-packages exchange-core-engine @runtest
+  obj-magic:
+    uses: winterchill-trading/infra/.github/workflows/obj-magic.yml@main
