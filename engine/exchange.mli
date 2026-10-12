@@ -112,6 +112,10 @@ val set_mark : t -> Symbol.t -> Price.t -> unit
 
 val set_funding_rate : t -> Symbol.t -> float -> unit
 
+(** The funding rate per interval charged at the next funding boundary: the last
+    [set_funding_rate] for the symbol, else [Config.default_funding_rate]. *)
+val funding_rate : t -> Symbol.t -> float
+
 (** Advances the clock to [now] (raises if it would go backwards), charges funding for
     every funding boundary crossed, then liquidates under-margined accounts. *)
 val step : t -> now:int -> unit

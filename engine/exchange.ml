@@ -553,14 +553,16 @@ let set_mark t symbol px =
 
 let set_funding_rate t symbol rate = Hashtbl.set t.funding_rates ~key:symbol ~data:rate
 
+let funding_rate t symbol =
+  Hashtbl.find t.funding_rates symbol
+  |> Option.value ~default:t.config.default_funding_rate
+;;
+
 let apply_funding t =
   List.iter t.config.instruments ~f:(fun i ->
     let symbol = i.symbol in
     Option.iter (mark t symbol) ~f:(fun mark ->
-      let rate =
-        Hashtbl.find t.funding_rates symbol
-        |> Option.value ~default:t.config.default_funding_rate
-      in
+      let rate = funding_rate t symbol in
       let payments = Clearinghouse.apply_funding t.clearinghouse ~symbol ~rate ~mark in
       if not (List.is_empty payments)
       then emit t (Funding { symbol; rate; mark; payments; time = t.time })))
