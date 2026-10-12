@@ -122,3 +122,80 @@ let%expect_test "coarse lot sizes and unlisted symbols still trade" =
     ((symbol SOLUSDT) (reference (150.06)) (accepted_size_range ((1 98))))
     |}]
 ;;
+
+let%expect_test "randomize: the same seed gives the same config, others differ" =
+  let show seed =
+    let c = Market_sim.Config.randomize ~seed in
+    let r x ~digits = Float.round_decimal x ~decimal_digits:digits in
+    print_s
+      [%message
+        ""
+          (seed : int)
+          ~vol_bps:(r c.vol_bps ~digits:2 : float)
+          ~traders:(c.noise_traders : int)
+          ~post:(r c.post_probability ~digits:3 : float)
+          ~cancel:(r c.cancel_probability ~digits:3 : float)
+          ~market:(r c.market_probability ~digits:4 : float)
+          ~inside:(r c.inside_touch_probability ~digits:3 : float)
+          ~offset_bps:(r c.max_offset_bps ~digits:2 : float)]
+  in
+  List.iter [ 1; 2; 3 ] ~f:show;
+  [%expect {|
+    ((seed 1) (vol_bps 16.75) (traders 11) (post 0.286) (cancel 0.258)
+     (market 0.0333) (inside 0.024) (offset_bps 5.21))
+    ((seed 2) (vol_bps 9.03) (traders 15) (post 0.319) (cancel 0.287)
+     (market 0.0101) (inside 0.067) (offset_bps 6.55))
+    ((seed 3) (vol_bps 7.9) (traders 12) (post 0.179) (cancel 0.133)
+     (market 0.0217) (inside 0.105) (offset_bps 29.65))
+    |}];
+  let config seed = [%sexp_of: Market_sim.Config.t] (Market_sim.Config.randomize ~seed) in
+  print_s [%sexp (Sexp.equal (config 42) (config 42) : bool)];
+  [%expect {| true |}]
+;;
+
+(* Mean quoted spread of BTC in bps over a run; raises if the book ever crosses. *)
+let spread_stats config =
+  let exchange = Exchange.create () in
+  let sim = Market_sim.create config exchange in
+  let btc = Symbol.of_string "BTC" in
+  let spreads = ref [] in
+  for i = 1 to 600 do
+    Market_sim.tick sim;
+    Exchange.step exchange ~now:(i * 100_000_000);
+    ignore (Exchange.drain_events exchange : Event.t list);
+    let book = Option.value_exn (Exchange.book exchange btc) in
+    Order_book.invariant book;
+    match Order_book.best_bid book, Order_book.best_ask book with
+    | Some bid, Some ask ->
+      let bid = Price.to_float bid
+      and ask = Price.to_float ask in
+      spreads := ((ask -. bid) /. ((ask +. bid) /. 2.) *. 10_000.) :: !spreads
+    | _ -> ()
+  done;
+  let n = List.length !spreads in
+  Float.round_decimal
+    (List.sum (module Float) !spreads ~f:Fn.id /. Float.of_int n)
+    ~decimal_digits:2
+;;
+
+let%expect_test "inside-touch orders tighten the spread" =
+  let base = { Market_sim.Config.default with seed = 9; noise_traders = 6 } in
+  print_s
+    [%message
+      ""
+        ~without:(spread_stats base : float)
+        ~with_inside_touch:
+          (spread_stats { base with inside_touch_probability = 0.2 } : float)];
+  [%expect {| ((without 5.23) (with_inside_touch 0.39)) |}]
+;;
+
+let%expect_test "randomized configs run and keep the book uncrossed" =
+  List.iter [ 1; 2; 3 ] ~f:(fun seed ->
+    let spread = spread_stats (Market_sim.Config.randomize ~seed) in
+    print_s [%message (seed : int) (spread : float)]);
+  [%expect {|
+    ((seed 1) (spread 3.53))
+    ((seed 2) (spread 0.88))
+    ((seed 3) (spread 0.67))
+    |}]
+;;
