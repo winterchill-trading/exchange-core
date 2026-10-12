@@ -97,7 +97,8 @@ let%expect_test "a journal replays into the same event stream" =
         ~identical:
           ([%equal: Sexp.t list] (event_sexps events) (event_sexps replayed_events)
            : bool)];
-  [%expect {|
+  [%expect
+    {|
     ((inputs 4498) (loaded 4498) (bytes 194561)
      (kinds
       ((Cancel 1288) (Cancel_by_client_order_id 8) (Deposit 5) (Modify 8)
@@ -138,9 +139,9 @@ let%expect_test "truncated and foreign files are errors" =
   let s = Journal.to_string [ Step { now = 1 }; Step { now = 2 } ] in
   print_s [%sexp (Journal.of_string s : Input.t list Or_error.t)];
   [%expect {| (Ok ((Step (now 1)) (Step (now 2)))) |}];
-  print_s
-    [%sexp (Journal.of_string (String.drop_suffix s 1) : Input.t list Or_error.t)];
-  [%expect {|
+  print_s [%sexp (Journal.of_string (String.drop_suffix s 1) : Input.t list Or_error.t)];
+  [%expect
+    {|
     (Error
      ("Journal: unreadable record" (offset 10) (records_read 1)
       (exn (Bin_prot__Common.Buffer_short))))

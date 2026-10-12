@@ -25,8 +25,7 @@ let samples : Input.t list =
       ; symbol = Some btc
       ; order_id = Some (Order_id.of_int 7)
       ; client_order_id = None
-      ; reason =
-          Post_only_would_cross { best_bid = Some (px "99999.9"); best_ask = None }
+      ; reason = Post_only_would_cross { best_bid = Some (px "99999.9"); best_ask = None }
       }
   ; Reject
       { account = a
@@ -62,7 +61,8 @@ let%expect_test "bin_prot round trip" =
       | sexp -> Sexp.to_string sexp
     in
     printf "%-26s %3d bytes\n" name (Bigstring.length buf));
-  [%expect {|
+  [%expect
+    {|
     Deposit                     53 bytes
     Set_leverage                49 bytes
     Place                       68 bytes

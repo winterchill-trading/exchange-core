@@ -115,11 +115,11 @@ let%expect_test "scripted trace: quote, take, mark move, funding, liquidation" =
     ignore (Exchange.set_leverage ex taker btc 40 : unit Or_error.t);
     place ex taker (Order_request.market btc Buy ~size:(sz "0.15")));
   step ex "mark rises" (fun () -> Exchange.set_mark ex btc (px "100500"));
-  step ex "one hour: funding" (fun () ->
-    Exchange.step ex ~now:(3_600 * 1_000_000_000));
+  step ex "one hour: funding" (fun () -> Exchange.step ex ~now:(3_600 * 1_000_000_000));
   step ex "mark drops: taker is liquidated" (fun () ->
     Exchange.set_mark ex btc (px "93000"));
-  [%expect {|
+  [%expect
+    {|
     == deposits (t=0s)
       asks
       bids

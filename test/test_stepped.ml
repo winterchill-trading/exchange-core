@@ -5,30 +5,32 @@ open Helpers
 
 let me = acct 7
 
-(* A toy market maker: every 10 steps, cancel its quotes and quote one lot each side,
-   5 bps around the mid. *)
+(* A toy market maker: every 10 steps, cancel its quotes and quote one lot each side, 5
+   bps around the mid. *)
 let quoter (h : Stepped.t) (_ : Event.Numbered.t list) =
   let ex = Stepped.exchange h in
   if Stepped.steps h % 10 = 1
   then (
     List.iter (Exchange.open_orders ex me) ~f:(fun o ->
       ignore (Exchange.cancel ex me ~symbol:o.symbol o.order_id : Cancel_status.t));
-    Option.iter (Option.bind (Exchange.book ex btc) ~f:Order_book.mid) ~f:(fun mid ->
-      let mid = Price.to_float mid in
-      let instrument = Option.value_exn (Exchange.instrument ex btc) in
-      List.iter
-        [ Side.Buy, mid *. 0.9995; Sell, mid *. 1.0005 ]
-        ~f:(fun (side, p) ->
-          ignore
-            (Exchange.place
-               ex
-               me
-               (Order_request.limit
-                  btc
-                  side
-                  ~px:(Instrument.round_price instrument p)
-                  ~size:(sz "0.01"))
-             : Order_status.t))))
+    Option.iter
+      (Option.bind (Exchange.book ex btc) ~f:Order_book.mid)
+      ~f:(fun mid ->
+        let mid = Price.to_float mid in
+        let instrument = Option.value_exn (Exchange.instrument ex btc) in
+        List.iter
+          [ Side.Buy, mid *. 0.9995; Sell, mid *. 1.0005 ]
+          ~f:(fun (side, p) ->
+            ignore
+              (Exchange.place
+                 ex
+                 me
+                 (Order_request.limit
+                    btc
+                    side
+                    ~px:(Instrument.round_price instrument p)
+                    ~size:(sz "0.01"))
+               : Order_status.t))))
 ;;
 
 let run ?journal () =
@@ -68,7 +70,8 @@ let summary h =
 let%expect_test "a quoting strategy in the stepped harness" =
   let h = run () in
   print_s (summary h);
-  [%expect {|
+  [%expect
+    {|
     ((steps 600) (now_s 60) (inputs 7887) (events 5983) (my_fills 32)
      (position ((BTC 0.02528))) (equity 100002.85050817))
     |}];

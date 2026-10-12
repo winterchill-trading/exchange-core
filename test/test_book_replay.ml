@@ -39,9 +39,9 @@ let%expect_test "books rebuilt from drained events match the exchange after ever
         ~next_seq:(Book_replay.next_seq replay : int)
         ~mismatches:(!mismatches : int)
         ~levels:
-          (List.map (symbols ex) ~f:(fun s -> s, depth s)
-           : (Symbol.t * (int * int)) list)];
-  [%expect {|
+          (List.map (symbols ex) ~f:(fun s -> s, depth s) : (Symbol.t * (int * int)) list)];
+  [%expect
+    {|
     ((events 5988) (next_seq 5989) (mismatches 0)
      (levels ((BTC (12 13)) (ETH (17 14)) (SOL (16 15)))))
     |}]
@@ -71,12 +71,12 @@ let%expect_test "liquidation cancels reach the rebuilt book" =
   print_s
     [%message
       ""
-        ~exchange:
-          (show (Exchange.l2 ex btc) : (L2.Level.t list * L2.Level.t list) option)
+        ~exchange:(show (Exchange.l2 ex btc) : (L2.Level.t list * L2.Level.t list) option)
         ~rebuilt:
           (show (Book_replay.l2 replay btc ~n_levels:20 ~time:0)
            : (L2.Level.t list * L2.Level.t list) option)];
-  [%expect {|
+  [%expect
+    {|
     ((exchange (((((px 95000) (sz 0.01) (n 1))) ())))
      (rebuilt (((((px 95000) (sz 0.01) (n 1))) ()))))
     |}]
@@ -100,8 +100,7 @@ let%expect_test "gaps and unknown orders are errors" =
   let replay = Book_replay.create (symbols ex) in
   print_s [%sexp (Book_replay.apply replay cancelled : unit Or_error.t)];
   [%expect {| (Error ("Book_replay: sequence gap" (expected 1) (got 2))) |}];
-  print_s
-    [%sexp (Book_replay.apply_all replay [ accepted; accepted ] : unit Or_error.t)];
+  print_s [%sexp (Book_replay.apply_all replay [ accepted; accepted ] : unit Or_error.t)];
   [%expect {| (Error ("Book_replay: sequence gap" (expected 2) (got 1))) |}];
   (* Starting mid-stream, the cancel of an order never seen is ignored. *)
   let replay = Book_replay.create ~next_seq:2 (symbols ex) in

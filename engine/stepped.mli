@@ -1,7 +1,7 @@
 (** A deterministic, stepped exchange for testing trading strategies offline.
 
-    A harness owns an {!Exchange.t}, optionally a {!Market_sim.t} for background flow, and a
-    fixed step length. Each {!step}:
+    A harness owns an {!Exchange.t}, optionally a {!Market_sim.t} for background flow, and
+    a fixed step length. Each {!step}:
     + ticks the market simulation (marks and noise orders),
     + advances the exchange clock by [step_ns] (funding, liquidation),
     + drains the events of the step, numbered.

@@ -140,7 +140,8 @@ let%expect_test "randomize: the same seed gives the same config, others differ" 
           ~offset_bps:(r c.max_offset_bps ~digits:2 : float)]
   in
   List.iter [ 1; 2; 3 ] ~f:show;
-  [%expect {|
+  [%expect
+    {|
     ((seed 1) (vol_bps 16.75) (traders 11) (post 0.286) (cancel 0.258)
      (market 0.0333) (inside 0.024) (offset_bps 5.21))
     ((seed 2) (vol_bps 9.03) (traders 15) (post 0.319) (cancel 0.287)
@@ -193,7 +194,8 @@ let%expect_test "randomized configs run and keep the book uncrossed" =
   List.iter [ 1; 2; 3 ] ~f:(fun seed ->
     let spread = spread_stats (Market_sim.Config.randomize ~seed) in
     print_s [%message (seed : int) (spread : float)]);
-  [%expect {|
+  [%expect
+    {|
     ((seed 1) (spread 3.53))
     ((seed 2) (spread 0.88))
     ((seed 3) (spread 0.67))

@@ -535,14 +535,18 @@ module Flow_op = struct
     let size = Int.gen_incl 1 200 in
     Quickcheck.Generator.weighted_union
       [ ( 8.
-        , let%map owner and side and px = Int.gen_incl 9_980 10_020 and size
+        , let%map owner
+          and side
+          and px = Int.gen_incl 9_980 10_020
+          and size
           and tif = Quickcheck.Generator.of_list Tif.all in
           Place { owner; side; px; size; tif } )
       ; ( 1.
         , let%map owner and side and size in
           Market { owner; side; size } )
       ; ( 2.
-        , let%map owner and oid = Int.gen_incl 1 120 in
+        , let%map owner
+          and oid = Int.gen_incl 1 120 in
           Cancel { owner; oid } )
       ; (1., Int.gen_incl 0 90 >>| fun minutes -> Step { minutes })
       ; (1., Int.gen_incl 700 1300 >>| fun px -> Set_mark { px })
