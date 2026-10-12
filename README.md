@@ -74,9 +74,14 @@ protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs
 | `Account_state` | Balance, positions and per-instrument leverage of one account |
 | `Clearinghouse` | All accounts: fill settlement, per-instrument fees, initial and maintenance margin, liquidation, funding, `Account_view` |
 | `Execution` | One account's side of a fill (fill plus settlement), as kept in its history |
-| `Event` | Log entries: order accepted/rejected/filled/cancelled, fill, liquidation, funding |
-| `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place (`place_with_order_id` also returns the assigned id), cancel, modify, views, `set_mark`, `funding_rate` / `set_funding_rate`, `step`, `drain_events` |
-| `Market_sim` | Seeded random-walk reference prices, marks, and noise traders posting, cancelling and taking |
+| `Event` | Log entries: order accepted/rejected/filled/cancelled, fill, liquidation, funding; `Event.Numbered` adds the sequence number |
+| `Target` | The order a modify replaces: by order id or client order id (also `Exchange.Target`) |
+| `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place (`place_with_order_id` also returns the assigned id), cancel, modify, views, `set_mark`, `funding_rate` / `set_funding_rate`, `step`, `drain_events` / `drain_numbered_events`, `record_inputs`, `apply` |
+| `Input` | Every mutating request as a value, with a `bin_prot` encoding |
+| `Journal` | Writes inputs to a binary file, loads them and replays them into a fresh exchange |
+| `Book_replay` | Rebuilds order books from numbered events alone (as a feed consumer would), with gap detection |
+| `Market_sim` | Seeded random-walk reference prices, marks, and noise traders posting, cancelling, quoting inside the spread and taking; `Config.randomize ~seed` |
+| `Stepped` | Deterministic stepped harness: exchange plus simulation advanced one step at a time, a strategy reacting to each step's events, every input recorded and checkable by replay |
 
 ```ocaml
 let ex = Exchange.create () in
@@ -86,6 +91,45 @@ Exchange.place ex alice (Order_request.limit btc Buy ~px ~size)
 Exchange.step ex ~now:(Time_ns.Span.to_int_ns Time_ns.Span.hour);
 Exchange.drain_events ex
 ```
+
+## Journals, replay and the stepped harness
+
+Every mutating `Exchange` call is reported, once performed, to the recorders added with
+`Exchange.record_inputs` as an `Input.t`; `Exchange.apply` performs one. Because the
+engine is deterministic, applying the recorded inputs in order to a fresh exchange with
+the same `Config.t` reproduces the run exactly, event log included.
+
+```ocaml
+let journal = Journal.create "run.journal" in
+Journal.attach journal ex;                    (* before Market_sim.create, so deposits count *)
+(* ... run ... *)
+Journal.close journal;
+let replayed = Journal.replay (ok_exn (Journal.load "run.journal")) in
+```
+
+A journal file is the magic string `EXJRNL01` followed by one `bin_prot` value per input.
+The wire shape uses only integers (units of `10^-8`), strings and floats, so it does not
+change when the in-memory types do. A truncated last record is reported by `load`.
+
+Events carry consecutive sequence numbers from 1 (`drain_numbered_events`).
+`Book_replay` applies them to its own order books and must see every number in order;
+the tests check its L2 against `Exchange.l2` after every tick of a seeded simulation.
+
+`Stepped` is the harness for testing a strategy offline (intended for `mm-core`):
+
+```ocaml
+let h = Stepped.create ~journal Stepped.Config.default in
+Exchange.deposit (Stepped.exchange h) me (Usd.of_int 100_000);
+Stepped.run h ~steps:600 ~f:(fun h events ->
+  (* react to this step's events by calling Exchange functions on (Stepped.exchange h) *)
+  ());
+ok_exn (Stepped.check_replay h)
+```
+
+Each step ticks the simulation, advances the clock by `step_ns` (100ms by default) and
+returns that step's numbered events; the strategy's requests take effect immediately and
+their events arrive with the next step. `check_replay` replays all recorded inputs into a
+fresh exchange and reports the first event that differs.
 
 ## Design notes
 
@@ -139,13 +183,20 @@ Exchange.drain_events ex
   ($20 to $2000 by default) are scaled up per instrument when one lot is worth more than
   the minimum, and sizes never round below one lot, so coarse size steps still trade.
   Noise traders (accounts `0xffff...ff0000000N`, $10M each) post GTC orders up to 25 bps
-  from the reference, cancel old ones and occasionally send market orders. Prices are
+  from the reference, cancel old ones and occasionally send market orders. With
+  `inside_touch_probability` above zero (default zero, which leaves seeded runs
+  unchanged) they also post orders strictly inside a spread wider than one tick.
+  `Config.randomize ~seed` draws volatility, trader count, probabilities and offsets from
+  the seed. Prices are
   rounded with `Instrument.round_price`. Runs are reproducible for a seed, given the
   same sequence of external requests. Calling `tick` on a timer is the front end's job.
 
 ## Tests
 
 `dune test` runs expect tests (instrument rules, fees, PnL, liquidation, funding,
-exchange flows, a seeded market simulation) and `Base_quickcheck` properties: balances
-plus unrealised PnL plus fees are conserved, books never cross, and every resting order
-is listed once in its owner's open orders.
+exchange flows, a seeded market simulation, a text trace of book, margin and accounts
+per step, journal round trips and replays, books rebuilt from events, the stepped
+harness) and `Base_quickcheck` properties: balances plus unrealised PnL plus fees are
+conserved, books never cross, and every resting order is listed once in its owner's open
+orders; with steps and mark moves mixed in, positions net to zero once liquidated sizes
+are counted, and order and trade ids are unique.
