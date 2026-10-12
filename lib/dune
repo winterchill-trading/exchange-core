@@ -1,0 +1,6 @@
+(library
+ (name exchange_core)
+ (public_name exchange-core)
+ (libraries core fixed-decimal)
+ (preprocess
+  (pps ppx_jane)))

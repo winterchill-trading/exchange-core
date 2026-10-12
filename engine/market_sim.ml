@@ -1,0 +1,183 @@
+open! Core
+open! Exchange_core
+
+module Config = struct
+  type t =
+    { seed : int
+    ; symbols : Symbol.t list
+    ; initial_prices : (Symbol.t * Price.t) list
+    ; vol_bps : float
+    ; noise_traders : int
+    ; trader_balance : Usd.t
+    ; tick_interval : Time_ns.Span.t
+    ; max_orders_per_symbol : int
+    ; post_probability : float
+    ; cancel_probability : float
+    ; market_probability : float
+    ; max_offset_bps : float
+    ; min_notional : float
+    ; max_notional : float
+    }
+  [@@deriving sexp_of]
+
+  let default =
+    { seed = 0
+    ; symbols = []
+    ; initial_prices =
+        List.map
+          [ "BTC", "100000"; "ETH", "3500"; "SOL", "150" ]
+          ~f:(fun (s, p) -> Symbol.of_string s, Price.of_string p)
+    ; vol_bps = 5.
+    ; noise_traders = 10
+    ; trader_balance = Usd.of_int 10_000_000
+    ; tick_interval = Time_ns.Span.of_int_ms 100
+    ; max_orders_per_symbol = 5
+    ; post_probability = 0.3
+    ; cancel_probability = 0.1
+    ; market_probability = 0.02
+    ; max_offset_bps = 25.
+    ; min_notional = 20.
+    ; max_notional = 2000.
+    }
+  ;;
+end
+
+module Market = struct
+  type t =
+    { instrument : Instrument.t
+    ; mutable reference : float
+    }
+
+  let symbol t = t.instrument.symbol
+end
+
+type t =
+  { config : Config.t
+  ; exchange : Exchange.t
+  ; random : Random.State.t
+  ; markets : Market.t list
+  ; traders : Account.t list
+  ; sigma : float (** per-tick standard deviation of log returns *)
+  }
+
+let config t = t.config
+let traders t = t.traders
+let trader_account i = Account.of_string (sprintf "0x%s%08x" (String.make 32 'f') i)
+
+let create (config : Config.t) exchange =
+  let symbols =
+    match config.symbols with
+    | [] -> List.map (Exchange.instruments exchange) ~f:(fun i -> i.symbol)
+    | symbols -> symbols
+  in
+  let markets =
+    List.map symbols ~f:(fun symbol ->
+      match Exchange.instrument exchange symbol with
+      | Some instrument ->
+        let reference =
+          List.Assoc.find config.initial_prices symbol ~equal:Symbol.equal
+          |> Option.value_map ~f:Price.to_float ~default:100.
+        in
+        { Market.instrument; reference }
+      | None -> raise_s [%message "Market_sim: unknown symbol" (symbol : Symbol.t)])
+  in
+  let traders = List.init config.noise_traders ~f:trader_account in
+  List.iter traders ~f:(fun a -> Exchange.deposit exchange a config.trader_balance);
+  let sigma =
+    config.vol_bps /. 10_000. *. Float.sqrt (Time_ns.Span.to_sec config.tick_interval)
+  in
+  { config
+  ; exchange
+  ; random = Random.State.make [| config.seed |]
+  ; markets
+  ; traders
+  ; sigma
+  }
+;;
+
+let reference_price t symbol =
+  List.find t.markets ~f:(fun m -> Symbol.equal (Market.symbol m) symbol)
+  |> Option.map ~f:(fun (m : Market.t) -> Instrument.round_price m.instrument m.reference)
+;;
+
+let uniform t lo hi = lo +. Random.State.float t.random (hi -. lo)
+let chance t p = Float.(Random.State.float t.random 1. < p)
+let random_side t = if Random.State.bool t.random then Side.Buy else Side.Sell
+
+(* Box-Muller. *)
+let gaussian t =
+  let u1 = Float.max Float.min_positive_normal_value (Random.State.float t.random 1.) in
+  let u2 = Random.State.float t.random 1. in
+  Float.sqrt (-2. *. Float.log u1) *. Float.cos (2. *. Float.pi *. u2)
+;;
+
+(* A size worth a random notional at [px], rounded down to the lot size. *)
+let random_size t (m : Market.t) ~px =
+  let notional = uniform t t.config.min_notional t.config.max_notional in
+  Size.round_down (Size.of_float (notional /. px)) ~decimals:m.instrument.size_decimals
+;;
+
+let cancel_oldest t trader (m : Market.t) =
+  let symbol = Market.symbol m in
+  let orders =
+    Exchange.open_orders t.exchange trader
+    |> List.filter ~f:(fun (o : Open_order.t) -> Symbol.equal o.symbol symbol)
+  in
+  let n = List.length orders in
+  if n > t.config.max_orders_per_symbol || (n > 0 && chance t t.config.cancel_probability)
+  then (
+    (* [open_orders] is newest first. *)
+    let oldest = List.last_exn orders in
+    ignore (Exchange.cancel t.exchange trader ~symbol oldest.order_id : Cancel_status.t))
+;;
+
+let post t trader (m : Market.t) =
+  if chance t t.config.post_probability
+  then (
+    let side = random_side t in
+    let offset = uniform t 0.5 t.config.max_offset_bps /. 10_000. in
+    let px =
+      match side with
+      | Buy -> m.reference *. (1. -. offset)
+      | Sell -> m.reference *. (1. +. offset)
+    in
+    let limit_px = Instrument.round_price m.instrument px in
+    let size = random_size t m ~px in
+    if Size.is_positive size
+    then
+      ignore
+        (Exchange.place
+           t.exchange
+           trader
+           (Order_request.limit (Market.symbol m) side ~px:limit_px ~size)
+         : Order_status.t))
+;;
+
+let market t trader (m : Market.t) =
+  if chance t t.config.market_probability
+  then (
+    let side = random_side t in
+    let size = random_size t m ~px:m.reference in
+    if Size.is_positive size
+    then
+      ignore
+        (Exchange.place
+           t.exchange
+           trader
+           (Order_request.market (Market.symbol m) side ~size)
+         : Order_status.t))
+;;
+
+let tick t =
+  List.iter t.markets ~f:(fun m ->
+    m.reference <- m.reference *. Float.exp (t.sigma *. gaussian t);
+    Exchange.set_mark
+      t.exchange
+      (Market.symbol m)
+      (Instrument.round_price m.instrument m.reference));
+  List.iter t.traders ~f:(fun trader ->
+    List.iter t.markets ~f:(fun m ->
+      cancel_oldest t trader m;
+      post t trader m;
+      market t trader m))
+;;

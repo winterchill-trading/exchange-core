@@ -1,0 +1,8 @@
+(library
+ (name exchange_core_test)
+ (inline_tests
+  (flags
+   (:standard -source-tree-root .)))
+ (libraries core exchange-core exchange-core-engine order-book)
+ (preprocess
+  (pps ppx_jane)))

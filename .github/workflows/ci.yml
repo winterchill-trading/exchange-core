@@ -1,0 +1,25 @@
+name: ci
+on: [push, pull_request]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ocaml-variants.5.2.0+ox
+          opam-repositories: |
+            ox: https://github.com/oxcaml/opam-repository.git
+            default: https://github.com/ocaml/opam-repository.git
+      # exchange-core-engine depends on order-book, which depends on exchange-core:
+      # pin exchange-core from this checkout so order-book can be installed first.
+      - run: opam pin add fixed-decimal https://github.com/winterchill-trading/fixed-decimal.git --no-action --yes
+      - run: opam pin add exchange-core . --no-action --yes
+      - run: opam pin add order-book https://github.com/winterchill-trading/order-book.git --no-action --yes
+      - run: opam install ./exchange-core-engine.opam --deps-only --with-test --yes
+      - run: opam install ./exchange-core.opam --deps-only --with-test --yes
+      - run: opam exec -- dune build
+      - run: opam exec -- dune test

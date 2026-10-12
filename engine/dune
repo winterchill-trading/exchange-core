@@ -1,0 +1,6 @@
+(library
+ (name exchange_core_engine)
+ (public_name exchange-core-engine)
+ (libraries core fixed-decimal exchange-core order-book)
+ (preprocess
+  (pps ppx_jane)))
