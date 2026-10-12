@@ -1,0 +1,143 @@
+# exchange-core
+
+Venue-neutral building blocks for exchange simulators: trading primitives, order and
+account views, and a deterministic perpetuals exchange engine (matching, clearinghouse,
+cross margin, funding, liquidation, synthetic order flow).
+
+Built with [OxCaml](https://oxcaml.org) and the Jane Street library stack (Base, Core).
+Fixed-point arithmetic comes from
+[fixed-decimal](https://github.com/winterchill-trading/fixed-decimal) and matching from
+[order-book](https://github.com/winterchill-trading/order-book).
+
+Nothing here knows about a particular venue's wire format. A venue simulator (e.g.
+[hl-sim](https://github.com/winterchill-trading/hl-sim) for Hyperliquid) is an adapter:
+it maps its requests onto the engine, its universe onto `Instrument` records, and the
+engine's results and events onto its own responses and error wording.
+
+## Packages
+
+The repository holds two opam packages, because `order-book` sits between them:
+
+```
+fixed-decimal -> exchange-core -> order-book -> exchange-core-engine
+```
+
+| Package | Library module | Contents |
+| --- | --- | --- |
+| `exchange-core` | `Exchange_core` | primitives and value types; no matching |
+| `exchange-core-engine` | `Exchange_core_engine` | the engine, built on `order-book` |
+
+## Build
+
+```sh
+opam switch create 5.2.0+ox --repos ox=git+https://github.com/oxcaml/opam-repository.git,default
+opam pin add fixed-decimal https://github.com/winterchill-trading/fixed-decimal.git --no-action
+opam pin add exchange-core . --no-action
+opam pin add order-book https://github.com/winterchill-trading/order-book.git --no-action
+opam install ./exchange-core-engine.opam --deps-only --with-test
+dune build && dune test
+```
+
+Inside a dune workspace that also contains `fixed-decimal` and `order-book`, dune uses the
+sibling sources and the pins are not needed.
+
+## `Exchange_core`: primitives and views
+
+| Module | Description |
+| --- | --- |
+| `Price`, `Size`, `Usd` | Distinct fixed-point types (`Fixed_decimal.Make ()`), 8 decimals |
+| `Side` | `Buy` / `Sell` |
+| `Tif` | `Gtc` / `Ioc` / `Alo` (add liquidity only, i.e. post only) |
+| `Symbol` | Instrument name, opaque string |
+| `Account` | Account id (address, API key, user name), opaque string |
+| `Order_id`, `Trade_id` | Exchange-assigned ids (`int64`, `int`) |
+| `Client_order_id` | Client-assigned id, opaque string; venues validate their own format |
+| `Order_type` | `Limit of Tif.t` or `Market { slippage_bps }` |
+| `Order_request` | Symbol, side, size, optional limit price, type, reduce-only, client id |
+| `Order_status` | `Resting` / `Filled { total; avg_px }` / `Rejected of Reject_reason.t` |
+| `Reject_reason` | Why an order was rejected (invalid size or price, margin, self-trade, ...) |
+| `Cancel_status` | `Cancelled` / `Not_found` |
+| `Open_order` | A resting order as reported to its owner |
+| `L2` | Aggregated book snapshot, best first |
+| `Position_view`, `Account_view` | Positions and cross-margin summary at mark: balance, equity, margin used, maintenance, available |
+| `Fee_schedule` | Maker/taker fees in basis points |
+| `Instrument` | Symbol, size decimals, price tick, optional significant-figure limit, max leverage, fees; validation and rounding |
+
+None of these carry JSON codecs: encodings are venue-specific and live in the venue's
+protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs).
+
+## `Exchange_core_engine`: the engine
+
+| Module | Description |
+| --- | --- |
+| `Position` | Signed size, weighted entry price, realised PnL and funding for one instrument; `Direction` of each trade |
+| `Account_state` | Balance, positions and per-instrument leverage of one account |
+| `Clearinghouse` | All accounts: fill settlement, per-instrument fees, initial and maintenance margin, liquidation, funding, `Account_view` |
+| `Execution` | One account's side of a fill (fill plus settlement), as kept in its history |
+| `Event` | Log entries: order accepted/rejected/filled/cancelled, fill, liquidation, funding |
+| `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place, cancel, modify, views, `set_mark`, `step`, `drain_events` |
+| `Market_sim` | Seeded random-walk reference prices, marks, and noise traders posting, cancelling and taking |
+
+```ocaml
+let ex = Exchange.create () in
+Exchange.deposit ex alice (Usd.of_int 10_000);
+Exchange.place ex alice (Order_request.limit btc Buy ~px ~size)
+(* Resting { order_id; client_order_id } *)
+Exchange.step ex ~now:(Time_ns.Span.to_int_ns Time_ns.Span.hour);
+Exchange.drain_events ex
+```
+
+## Design notes
+
+- **Determinism.** Time is an `int` count of nanoseconds advanced by the caller with
+  `Exchange.step`; the engine never reads the wall clock. Order ids and trade ids are
+  sequential. Front ends convert timestamps to their venue's unit.
+- **Matching** is price-time priority with maker-price fills and self-trade prevention;
+  see the [order-book](https://github.com/winterchill-trading/order-book) design notes.
+  Market orders are IOC orders priced `slippage_bps` (default 5%) through the best
+  opposite price.
+- **Order statuses.** An order that rests (even after partial fills) is `Resting`; an
+  IOC or market order with any fill is `Filled` with the filled size and average price;
+  an IOC order with no fill, an ALO order that would cross and failed checks are
+  `Rejected` with a `Reject_reason.t`. Front ends may record their own rejections with
+  `Exchange.reject` so they appear in the event log.
+- **Validation**, in order: known symbol; limit price positive, on tick and within the
+  instrument's significant-figure limit (integers always pass it); size a positive
+  multiple of `10^-size_decimals`; no duplicate client order id among the account's
+  resting orders; reduce-only orders clipped to the position (rejected if there is
+  nothing to reduce); notional at least `min_order_value` unless reduce-only; margin.
+- **Margin.** Cross margin only, one-way positions. Equity is balance plus unrealised
+  PnL at mark. A new order needs `notional / leverage` for the part that increases the
+  position, out of equity minus position margin minus margin held by resting orders
+  (resting orders reserve their full notional / leverage). Maintenance margin is
+  `notional / (2 * max_leverage)`. Default leverage is `min 20 max_leverage`.
+- **Fees** come from each instrument's `Fee_schedule` (default taker 3.5 bps, maker
+  1 bp) and are always charged.
+- **Mark price** is the last `set_mark`, else the last trade price, else the book mid.
+- **Liquidation.** `set_mark` and `step` close every position of an account whose equity
+  is below maintenance margin at mark and cancel its resting orders. There is no
+  liquidator or backstop: the closed size leaves open interest, and losses beyond the
+  balance leave a negative balance.
+- **Funding** is charged at each multiple of the funding interval (1 hour) crossed by
+  `step`: every position pays `size * mark * rate`, so longs pay shorts when the rate is
+  positive. The rate is per instrument (`set_funding_rate`), default 0.00125%; it is not
+  derived from a premium index.
+- **Modify** cancels the target and places the replacement with a new order id (losing
+  priority). If the replacement is rejected the original stays cancelled.
+- **Fixed point.** `Price`, `Size` and `Usd` count units of `10^-8` in an `int`.
+  Notional values use `Fixed_decimal.Product (Price) (Size) (Usd)` and fee and funding
+  rates a private `Rate` type; products and quotients never overflow an intermediate
+  and truncate toward zero.
+- **Market simulation.** Each instrument's reference price is a geometric random walk
+  with `vol_bps` volatility per second, stepped once per `tick`; the mark follows it.
+  Noise traders (accounts `0xffff...ff0000000N`, $10M each) post GTC orders up to 25 bps
+  from the reference, cancel old ones and occasionally send market orders. Prices are
+  rounded with `Instrument.round_price`. Runs are reproducible for a seed, given the
+  same sequence of external requests. Calling `tick` on a timer is the front end's job.
+
+## Tests
+
+`dune test` runs expect tests (instrument rules, fees, PnL, liquidation, funding,
+exchange flows, a seeded market simulation) and `Base_quickcheck` properties: balances
+plus unrealised PnL plus fees are conserved, books never cross, and every resting order
+is listed once in its owner's open orders.
