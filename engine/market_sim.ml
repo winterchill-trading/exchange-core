@@ -160,7 +160,8 @@ let set_reference ?half_life t symbol px =
   let m = market_exn t symbol in
   let anchor = Price.to_float px in
   if Float.(anchor <= 0.)
-  then raise_s [%message "Market_sim.set_reference: price must be positive" (px : Price.t)];
+  then
+    raise_s [%message "Market_sim.set_reference: price must be positive" (px : Price.t)];
   m.anchor <- Some anchor;
   match half_life with
   | None ->
