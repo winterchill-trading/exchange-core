@@ -24,6 +24,9 @@ type t =
   | Order_rejected of
       { account : Account.t
       ; symbol : Symbol.t option
+      ; order_id : Order_id.t option
+      (** the id {!Exchange.place} assigned; [None] for rejections recorded by a front end
+          without one, and for a modify whose target was not found *)
       ; client_order_id : Client_order_id.t option
       ; reason : Reject_reason.t
       ; time : int

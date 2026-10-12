@@ -20,6 +20,7 @@ type t =
   | Order_rejected of
       { account : Account.t
       ; symbol : Symbol.t option
+      ; order_id : Order_id.t option
       ; client_order_id : Client_order_id.t option
       ; reason : Reject_reason.t
       ; time : int

@@ -225,12 +225,20 @@ let avg_px (fills : Order_book.Fill.t list) ~filled =
   Notional.div notional filled
 ;;
 
-let reject ?symbol ?client_order_id t account reason : Order_status.t =
-  emit t (Order_rejected { account; symbol; client_order_id; reason; time = t.time });
+let reject ?symbol ?order_id ?client_order_id t account reason : Order_status.t =
+  emit
+    t
+    (Order_rejected { account; symbol; order_id; client_order_id; reason; time = t.time });
   Rejected reason
 ;;
 
-(* Runs [submit] with a fresh oid and turns the book's result into an order status,
+let next_order_id t =
+  let order_id = Order_id.of_int t.next_oid in
+  t.next_oid <- t.next_oid + 1;
+  order_id
+;;
+
+(* Runs [submit] with [order_id] and turns the book's result into an order status,
    emitting events and settling fills. *)
 let submit
   t
@@ -238,13 +246,12 @@ let submit
   ~symbol
   ~side
   ~limit_px
+  ~order_id
   ~client_order_id
   ~(submit : oid:Order_id.t -> next_tid:(unit -> Trade_id.t) -> Order_book.Result.t)
   : Order_status.t
   =
   let book = Option.value_exn (book t symbol) in
-  let order_id = Order_id.of_int t.next_oid in
-  t.next_oid <- t.next_oid + 1;
   let next_tid () =
     let tid = t.next_tid in
     t.next_tid <- t.next_tid + 1;
@@ -273,7 +280,7 @@ let submit
   in
   let cancelled reason ~(no_fill : Reject_reason.t) : Order_status.t =
     if Size.is_zero r.filled
-    then reject t account ~symbol ?client_order_id no_fill
+    then reject t account ~symbol ~order_id ?client_order_id no_fill
     else (
       emit
         t
@@ -296,6 +303,7 @@ let submit
       t
       account
       ~symbol
+      ~order_id
       ?client_order_id
       (Post_only_would_cross
          { best_bid = Order_book.best_bid book; best_ask = Order_book.best_ask book })
@@ -349,11 +357,19 @@ let pre_trade_checks t account (instrument : Instrument.t) ~side ~px ~sz ~reduce
   sz
 ;;
 
-let place_limit t account (instrument : Instrument.t) (req : Order_request.t) ~px ~tif =
+let place_limit
+  t
+  account
+  (instrument : Instrument.t)
+  (req : Order_request.t)
+  ~order_id
+  ~px
+  ~tif
+  =
   let symbol = instrument.symbol in
   let cid = req.client_order_id in
   if not (Instrument.valid_price instrument px)
-  then reject t account ~symbol ?client_order_id:cid Invalid_price
+  then reject t account ~symbol ~order_id ?client_order_id:cid Invalid_price
   else (
     match
       pre_trade_checks
@@ -366,7 +382,7 @@ let place_limit t account (instrument : Instrument.t) (req : Order_request.t) ~p
         ~reduce_only:req.reduce_only
         ~cid
     with
-    | Error reason -> reject t account ~symbol ?client_order_id:cid reason
+    | Error reason -> reject t account ~symbol ~order_id ?client_order_id:cid reason
     | Ok sz ->
       submit
         t
@@ -374,6 +390,7 @@ let place_limit t account (instrument : Instrument.t) (req : Order_request.t) ~p
         ~symbol
         ~side:req.side
         ~limit_px:px
+        ~order_id
         ~client_order_id:cid
         ~submit:(fun ~oid ~next_tid ->
           Order_book.add_limit
@@ -396,6 +413,7 @@ let place_market
   account
   (instrument : Instrument.t)
   (req : Order_request.t)
+  ~order_id
   ~slippage_bps
   =
   let symbol = instrument.symbol in
@@ -403,7 +421,7 @@ let place_market
   let slippage_bps = Option.value slippage_bps ~default:t.config.market_slippage_bps in
   let b = Option.value_exn (book t symbol) in
   match Order_book.market_limit_px b ~side:req.side ~slippage_bps with
-  | None -> reject t account ~symbol ?client_order_id:cid No_liquidity
+  | None -> reject t account ~symbol ~order_id ?client_order_id:cid No_liquidity
   | Some limit_px ->
     (match
        pre_trade_checks
@@ -416,7 +434,7 @@ let place_market
          ~reduce_only:req.reduce_only
          ~cid
      with
-     | Error reason -> reject t account ~symbol ?client_order_id:cid reason
+     | Error reason -> reject t account ~symbol ~order_id ?client_order_id:cid reason
      | Ok sz ->
        submit
          t
@@ -424,6 +442,7 @@ let place_market
          ~symbol
          ~side:req.side
          ~limit_px
+         ~order_id
          ~client_order_id:cid
          ~submit:(fun ~oid ~next_tid ->
            Order_book.market
@@ -440,27 +459,36 @@ let place_market
              ()))
 ;;
 
-let place t account (req : Order_request.t) : Order_status.t =
-  match instrument t req.symbol with
-  | None ->
-    reject
-      t
-      account
-      ~symbol:req.symbol
-      ?client_order_id:req.client_order_id
-      Unknown_symbol
-  | Some instrument ->
-    (match req.order_type, req.px with
-     | Limit tif, Some px -> place_limit t account instrument req ~px ~tif
-     | Limit _, None ->
-       reject
-         t
-         account
-         ~symbol:req.symbol
-         ?client_order_id:req.client_order_id
-         Invalid_price
-     | Market { slippage_bps }, _ -> place_market t account instrument req ~slippage_bps)
+let place_with_order_id t account (req : Order_request.t) =
+  let order_id = next_order_id t in
+  let status : Order_status.t =
+    match instrument t req.symbol with
+    | None ->
+      reject
+        t
+        account
+        ~symbol:req.symbol
+        ~order_id
+        ?client_order_id:req.client_order_id
+        Unknown_symbol
+    | Some instrument ->
+      (match req.order_type, req.px with
+       | Limit tif, Some px -> place_limit t account instrument req ~order_id ~px ~tif
+       | Limit _, None ->
+         reject
+           t
+           account
+           ~symbol:req.symbol
+           ~order_id
+           ?client_order_id:req.client_order_id
+           Invalid_price
+       | Market { slippage_bps }, _ ->
+         place_market t account instrument req ~order_id ~slippage_bps)
+  in
+  order_id, status
 ;;
+
+let place t account req = snd (place_with_order_id t account req)
 
 let owned_symbol t account oid =
   Option.bind (Hashtbl.find t.owner_orders account) ~f:(fun tbl -> Hashtbl.find tbl oid)

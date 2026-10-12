@@ -50,14 +50,23 @@ val set_leverage : t -> Account.t -> Symbol.t -> int -> unit Or_error.t
 (** Validates, margin-checks and matches an order. Checks, in order: known symbol, price
     (limit orders), size, duplicate client order id, reduce-only (a reduce-only order is
     clipped to the size that reduces the position), minimum value, margin. A market order
-    is an IOC order priced [slippage_bps] through the best opposite price. *)
+    is an IOC order priced [slippage_bps] through the best opposite price.
+
+    Every call takes a fresh order id before any check, so a rejected order (including an
+    IOC or market order that fills nothing) has an id too; it is carried by the
+    [Order_rejected] event and returned by {!place_with_order_id}. *)
 val place : t -> Account.t -> Order_request.t -> Order_status.t
+
+(** [place], also returning the order id assigned to the request whatever the outcome (for
+    [Resting] and [Filled] it is the status's [order_id]). *)
+val place_with_order_id : t -> Account.t -> Order_request.t -> Order_id.t * Order_status.t
 
 (** Records a rejection decided by a venue front end (e.g. an unsupported order kind), so
     that it appears in the event log like the engine's own rejections. Returns
-    [Rejected reason]. *)
+    [Rejected reason]. No order id is assigned; pass [order_id] to record one. *)
 val reject
   :  ?symbol:Symbol.t
+  -> ?order_id:Order_id.t
   -> ?client_order_id:Client_order_id.t
   -> t
   -> Account.t
