@@ -80,6 +80,32 @@ val traders : t -> Account.t list
 (** The reference price rounded to a valid price of the instrument. *)
 val reference_price : t -> Symbol.t -> Price.t option
 
+(** {2 External reference prices}
+
+    These let a price anchor tie a symbol to another market. They act on the exchange only
+    through its ordinary calls ([set_mark] here, orders in {!tick}), which are recorded as
+    {!Input.t} values, so a {!Journal} of an anchored run replays bit for bit. *)
+
+(** [set_reference t symbol px] replaces the symbol's random walk with the external price
+    [px].
+
+    Without [half_life], the reference price is set to [px] at once, the mark is set to it
+    (rounded to the instrument's tick), and later ticks keep it there until the next
+    [set_reference]: the noise traders quote around [px] and the walk stops.
+
+    With [half_life], the reference keeps its random walk but is pulled towards [px]: each
+    tick it moves by its random step plus [k * (px - reference)], where
+    [k = 1 - 0.5 ** (tick_interval / half_life)], so without noise the gap halves every
+    [half_life]. The mark is not moved until the next tick.
+
+    The random step is drawn on every tick in both cases, so anchoring one symbol does not
+    change the random numbers of the others. Raises if the symbol is not simulated, [px]
+    is not positive or [half_life] is not positive. *)
+val set_reference : ?half_life:Time_ns.Span.t -> t -> Symbol.t -> Price.t -> unit
+
+(** Returns the symbol to its free random walk, starting from the current reference. *)
+val clear_reference : t -> Symbol.t -> unit
+
 (** Advances the walk one tick and generates that tick's orders. Does not move the
     exchange clock. *)
 val tick : t -> unit

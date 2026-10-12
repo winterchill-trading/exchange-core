@@ -80,6 +80,10 @@ module Market = struct
   type t =
     { instrument : Instrument.t
     ; mutable reference : float
+    ; mutable anchor : float option
+    ; mutable pull : float
+    (** fraction of [anchor - reference] added each tick; [0.] pins the reference to the
+        anchor instead of walking *)
     }
 
   let symbol t = t.instrument.symbol
@@ -113,7 +117,7 @@ let create (config : Config.t) exchange =
           |> Option.value_or_thunk ~default:(fun () -> Config.default_price symbol)
           |> Price.to_float
         in
-        { Market.instrument; reference }
+        { Market.instrument; reference; anchor = None; pull = 0. }
       | None -> raise_s [%message "Market_sim: unknown symbol" (symbol : Symbol.t)])
   in
   let traders = List.init config.noise_traders ~f:trader_account in
@@ -130,9 +134,54 @@ let create (config : Config.t) exchange =
   }
 ;;
 
-let reference_price t symbol =
+let find_market t symbol =
   List.find t.markets ~f:(fun m -> Symbol.equal (Market.symbol m) symbol)
+;;
+
+let market_exn t symbol =
+  match find_market t symbol with
+  | Some m -> m
+  | None -> raise_s [%message "Market_sim: symbol not simulated" (symbol : Symbol.t)]
+;;
+
+let reference_price t symbol =
+  find_market t symbol
   |> Option.map ~f:(fun (m : Market.t) -> Instrument.round_price m.instrument m.reference)
+;;
+
+let set_mark t (m : Market.t) =
+  Exchange.set_mark
+    t.exchange
+    (Market.symbol m)
+    (Instrument.round_price m.instrument m.reference)
+;;
+
+let set_reference ?half_life t symbol px =
+  let m = market_exn t symbol in
+  let anchor = Price.to_float px in
+  if Float.(anchor <= 0.)
+  then raise_s [%message "Market_sim.set_reference: price must be positive" (px : Price.t)];
+  m.anchor <- Some anchor;
+  match half_life with
+  | None ->
+    m.pull <- 0.;
+    m.reference <- anchor;
+    set_mark t m
+  | Some half_life ->
+    if Time_ns.Span.(half_life <= zero)
+    then
+      raise_s
+        [%message
+          "Market_sim.set_reference: half_life must be positive"
+            (half_life : Time_ns.Span.t)];
+    let ticks = Time_ns.Span.(half_life // t.config.tick_interval) in
+    m.pull <- 1. -. (0.5 ** (1. /. ticks))
+;;
+
+let clear_reference t symbol =
+  let m = market_exn t symbol in
+  m.anchor <- None;
+  m.pull <- 0.
 ;;
 
 let uniform t lo hi = lo +. Random.State.float t.random (hi -. lo)
@@ -247,11 +296,16 @@ let inside_touch t trader (m : Market.t) =
 
 let tick t =
   List.iter t.markets ~f:(fun m ->
-    m.reference <- m.reference *. Float.exp (t.sigma *. gaussian t);
-    Exchange.set_mark
-      t.exchange
-      (Market.symbol m)
-      (Instrument.round_price m.instrument m.reference));
+    (* Drawn even for pinned markets, so anchoring one symbol leaves the others' random
+       streams unchanged. *)
+    let step = Float.exp (t.sigma *. gaussian t) in
+    (match m.anchor with
+     | None -> m.reference <- m.reference *. step
+     | Some anchor ->
+       if Float.(m.pull = 0.)
+       then m.reference <- anchor
+       else m.reference <- (m.reference *. step) +. (m.pull *. (anchor -. m.reference)));
+    set_mark t m);
   List.iter t.traders ~f:(fun trader ->
     List.iter t.markets ~f:(fun m ->
       cancel_oldest t trader m;
