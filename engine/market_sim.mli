@@ -59,6 +59,12 @@ module Config : sig
       trader, probabilities 0.3 / 0.1 / 0.02, offsets up to 25 bps, $20 to $2000 per
       order, no inside-touch orders. *)
   val default : t
+
+  (** [default] with seed [seed] and the flow parameters drawn from a generator seeded by
+      [seed]: volatility 1 to 20 bps/s, 3 to 15 traders, post / cancel / market / inside
+      probabilities in [0.1, 0.5] / [0.05, 0.3] / [0.005, 0.05] / [0, 0.2], offsets up to
+      5 to 50 bps. The same seed always gives the same configuration. *)
+  val randomize : seed:int -> t
 end
 
 type t

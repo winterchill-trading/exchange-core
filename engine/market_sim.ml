@@ -52,6 +52,28 @@ module Config = struct
     ; max_notional = 2000.
     }
   ;;
+
+  let randomize ~seed =
+    let random = Random.State.make [| seed; 0x5eed |] in
+    let between lo hi = lo +. Random.State.float random (hi -. lo) in
+    let vol_bps = between 1. 20. in
+    let noise_traders = 3 + Random.State.int random 13 in
+    let post_probability = between 0.1 0.5 in
+    let cancel_probability = between 0.05 0.3 in
+    let market_probability = between 0.005 0.05 in
+    let inside_touch_probability = between 0. 0.2 in
+    let max_offset_bps = between 5. 50. in
+    { default with
+      seed
+    ; vol_bps
+    ; noise_traders
+    ; post_probability
+    ; cancel_probability
+    ; market_probability
+    ; inside_touch_probability
+    ; max_offset_bps
+    }
+  ;;
 end
 
 module Market = struct
