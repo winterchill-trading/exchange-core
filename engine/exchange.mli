@@ -124,6 +124,23 @@ val funding_rate : t -> Symbol.t -> float
     every funding boundary crossed, then liquidates under-margined accounts. *)
 val step : t -> now:int -> unit
 
+(** {2 Inputs}
+
+    Every call above that changes the exchange ([deposit], [set_leverage], [place],
+    [place_with_order_id], [reject], [cancel], [cancel_by_client_order_id], [modify],
+    [set_mark], [set_funding_rate], [step]) is reported to the input recorders as an
+    {!Input.t} once it has been performed. Changes made directly through {!clearinghouse}
+    or {!book} are not. *)
+
+(** Adds a recorder, called after every mutating call with the request it performed.
+    Recorders are called in the order they were added. *)
+val record_inputs : t -> f:(Input.t -> unit) -> unit
+
+(** Performs a recorded request, discarding its result. Applying the inputs recorded from
+    an exchange, in order, to a fresh exchange created with the same configuration
+    reproduces it exactly, including the event log. *)
+val apply : t -> Input.t -> unit
+
 (** {2 Events} *)
 
 (** Returns the events since the previous call, oldest first, and forgets them. *)

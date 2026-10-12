@@ -53,6 +53,7 @@ type t =
   ; client_ids : Order_id.t Client_order_id.Table.t Account.Table.t
   ; fills : Execution.t list Account.Table.t (** newest first *)
   ; events : Event.t Queue.t
+  ; mutable recorders : (Input.t -> unit) list (** oldest first *)
   ; mutable time : int
   ; mutable next_oid : int
   ; mutable next_tid : int
@@ -74,6 +75,7 @@ let create ?(config = Config.default) () =
   ; client_ids = Account.Table.create ()
   ; fills = Account.Table.create ()
   ; events = Queue.create ()
+  ; recorders = []
   ; time = 0
   ; next_oid = 1
   ; next_tid = 1
@@ -87,6 +89,10 @@ let instrument t symbol = Instrument.find t.config.instruments symbol
 let clearinghouse t = t.clearinghouse
 let now t = t.time
 let emit t event = Queue.enqueue t.events event
+let record_inputs t ~f = t.recorders <- t.recorders @ [ f ]
+
+(* Reports a request that has been performed to the input recorders. *)
+let record t input = List.iter t.recorders ~f:(fun f -> f input)
 
 let drain_events t =
   let events = Queue.to_list t.events in
@@ -95,10 +101,15 @@ let drain_events t =
 ;;
 
 let book t symbol = Hashtbl.find t.books symbol
-let deposit t account usd = Clearinghouse.deposit t.clearinghouse account usd
+let deposit t account usd =
+  Clearinghouse.deposit t.clearinghouse account usd;
+  record t (Deposit { account; usd })
+;;
 
-let set_leverage t account symbol lev =
-  Clearinghouse.set_leverage t.clearinghouse account symbol lev
+let set_leverage t account symbol leverage =
+  let result = Clearinghouse.set_leverage t.clearinghouse account symbol leverage in
+  record t (Set_leverage { account; symbol; leverage });
+  result
 ;;
 
 let mark t symbol =
@@ -220,7 +231,7 @@ let avg_px (fills : Order_book.Fill.t list) ~filled =
   Notional.div notional filled
 ;;
 
-let reject ?symbol ?order_id ?client_order_id t account reason : Order_status.t =
+let emit_reject ?symbol ?order_id ?client_order_id t account reason : Order_status.t =
   emit
     t
     (Order_rejected { account; symbol; order_id; client_order_id; reason; time = t.time });
@@ -275,7 +286,7 @@ let submit
   in
   let cancelled reason ~(no_fill : Reject_reason.t) : Order_status.t =
     if Size.is_zero r.filled
-    then reject t account ~symbol ~order_id ?client_order_id no_fill
+    then emit_reject t account ~symbol ~order_id ?client_order_id no_fill
     else (
       emit
         t
@@ -294,7 +305,7 @@ let submit
   | Cancelled Ioc_unfilled -> cancelled Ioc_unfilled ~no_fill:No_liquidity
   | Cancelled Self_trade -> cancelled Self_trade ~no_fill:Self_trade
   | Would_cross ->
-    reject
+    emit_reject
       t
       account
       ~symbol
@@ -364,7 +375,7 @@ let place_limit
   let symbol = instrument.symbol in
   let cid = req.client_order_id in
   if not (Instrument.valid_price instrument px)
-  then reject t account ~symbol ~order_id ?client_order_id:cid Invalid_price
+  then emit_reject t account ~symbol ~order_id ?client_order_id:cid Invalid_price
   else (
     match
       pre_trade_checks
@@ -377,7 +388,7 @@ let place_limit
         ~reduce_only:req.reduce_only
         ~cid
     with
-    | Error reason -> reject t account ~symbol ~order_id ?client_order_id:cid reason
+    | Error reason -> emit_reject t account ~symbol ~order_id ?client_order_id:cid reason
     | Ok sz ->
       submit
         t
@@ -416,7 +427,7 @@ let place_market
   let slippage_bps = Option.value slippage_bps ~default:t.config.market_slippage_bps in
   let b = Option.value_exn (book t symbol) in
   match Order_book.market_limit_px b ~side:req.side ~slippage_bps with
-  | None -> reject t account ~symbol ~order_id ?client_order_id:cid No_liquidity
+  | None -> emit_reject t account ~symbol ~order_id ?client_order_id:cid No_liquidity
   | Some limit_px ->
     (match
        pre_trade_checks
@@ -429,7 +440,7 @@ let place_market
          ~reduce_only:req.reduce_only
          ~cid
      with
-     | Error reason -> reject t account ~symbol ~order_id ?client_order_id:cid reason
+     | Error reason -> emit_reject t account ~symbol ~order_id ?client_order_id:cid reason
      | Ok sz ->
        submit
          t
@@ -454,12 +465,12 @@ let place_market
              ()))
 ;;
 
-let place_with_order_id t account (req : Order_request.t) =
+let place_internal t account (req : Order_request.t) =
   let order_id = next_order_id t in
   let status : Order_status.t =
     match instrument t req.symbol with
     | None ->
-      reject
+      emit_reject
         t
         account
         ~symbol:req.symbol
@@ -470,7 +481,7 @@ let place_with_order_id t account (req : Order_request.t) =
       (match req.order_type, req.px with
        | Limit tif, Some px -> place_limit t account instrument req ~order_id ~px ~tif
        | Limit _, None ->
-         reject
+         emit_reject
            t
            account
            ~symbol:req.symbol
@@ -483,7 +494,19 @@ let place_with_order_id t account (req : Order_request.t) =
   order_id, status
 ;;
 
+let place_with_order_id t account request =
+  let result = place_internal t account request in
+  record t (Place { account; request });
+  result
+;;
+
 let place t account req = snd (place_with_order_id t account req)
+
+let reject ?symbol ?order_id ?client_order_id t account reason =
+  let status = emit_reject ?symbol ?order_id ?client_order_id t account reason in
+  record t (Reject { account; symbol; order_id; client_order_id; reason });
+  status
+;;
 
 let owned_symbol t account oid =
   Option.bind (Hashtbl.find t.owner_orders account) ~f:(fun tbl -> Hashtbl.find tbl oid)
@@ -496,19 +519,29 @@ let cancel_oid t account ~symbol ~oid ~reason : Cancel_status.t =
   | _ -> Not_found
 ;;
 
-let cancel t account ~symbol oid = cancel_oid t account ~symbol ~oid ~reason:User
+let cancel t account ~symbol order_id =
+  let status = cancel_oid t account ~symbol ~oid:order_id ~reason:User in
+  record t (Cancel { account; symbol; order_id });
+  status
+;;
 
 let oid_of_client_order_id t account cid =
   Option.bind (Hashtbl.find t.client_ids account) ~f:(fun tbl -> Hashtbl.find tbl cid)
 ;;
 
-let cancel_by_client_order_id t account ~symbol cid : Cancel_status.t =
-  match oid_of_client_order_id t account cid with
-  | None -> Not_found
-  | Some oid -> cancel_oid t account ~symbol ~oid ~reason:User
+let cancel_by_client_order_id t account ~symbol client_order_id : Cancel_status.t =
+  let status : Cancel_status.t =
+    match oid_of_client_order_id t account client_order_id with
+    | None -> Not_found
+    | Some oid -> cancel_oid t account ~symbol ~oid ~reason:User
+  in
+  record t (Cancel_by_client_order_id { account; symbol; client_order_id });
+  status
 ;;
 
-let modify t account (target : Target.t) (req : Order_request.t) : Order_status.t =
+let modify_internal t account (target : Target.t) (req : Order_request.t)
+  : Order_status.t
+  =
   let oid =
     match target with
     | Order_id oid -> Some oid
@@ -523,8 +556,14 @@ let modify t account (target : Target.t) (req : Order_request.t) : Order_status.
        | Some symbol -> remove_resting t ~symbol oid ~reason:Modified)
   in
   if cancelled
-  then place t account req
-  else reject t account ?client_order_id:req.client_order_id Order_not_found
+  then snd (place_internal t account req)
+  else emit_reject t account ?client_order_id:req.client_order_id Order_not_found
+;;
+
+let modify t account target request =
+  let status = modify_internal t account target request in
+  record t (Modify { account; target; request });
+  status
 ;;
 
 (* Views *)
@@ -571,10 +610,14 @@ let liquidate t =
 
 let set_mark t symbol px =
   Hashtbl.set t.marks ~key:symbol ~data:px;
-  liquidate t
+  liquidate t;
+  record t (Set_mark { symbol; px })
 ;;
 
-let set_funding_rate t symbol rate = Hashtbl.set t.funding_rates ~key:symbol ~data:rate
+let set_funding_rate t symbol rate =
+  Hashtbl.set t.funding_rates ~key:symbol ~data:rate;
+  record t (Set_funding_rate { symbol; rate })
+;;
 
 let funding_rate t symbol =
   Hashtbl.find t.funding_rates symbol
@@ -602,5 +645,26 @@ let step t ~now =
     t.next_funding <- t.next_funding + t.config.funding_interval_ns
   done;
   t.time <- now;
-  liquidate t
+  liquidate t;
+  record t (Step { now })
+;;
+
+let apply t (input : Input.t) =
+  match input with
+  | Deposit { account; usd } -> deposit t account usd
+  | Set_leverage { account; symbol; leverage } ->
+    ignore (set_leverage t account symbol leverage : unit Or_error.t)
+  | Place { account; request } -> ignore (place t account request : Order_status.t)
+  | Reject { account; symbol; order_id; client_order_id; reason } ->
+    ignore
+      (reject ?symbol ?order_id ?client_order_id t account reason : Order_status.t)
+  | Cancel { account; symbol; order_id } ->
+    ignore (cancel t account ~symbol order_id : Cancel_status.t)
+  | Cancel_by_client_order_id { account; symbol; client_order_id } ->
+    ignore (cancel_by_client_order_id t account ~symbol client_order_id : Cancel_status.t)
+  | Modify { account; target; request } ->
+    ignore (modify t account target request : Order_status.t)
+  | Set_mark { symbol; px } -> set_mark t symbol px
+  | Set_funding_rate { symbol; rate } -> set_funding_rate t symbol rate
+  | Step { now } -> step t ~now
 ;;
