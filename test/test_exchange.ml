@@ -395,6 +395,23 @@ let%expect_test "step charges hourly funding" =
     |}]
 ;;
 
+let%expect_test "funding_rate reads back the default and set rates" =
+  let ex = fresh () in
+  let eth = Symbol.of_string "ETH" in
+  let show () =
+    print_s
+      [%message
+        ""
+          ~btc:(Exchange.funding_rate ex btc : float)
+          ~eth:(Exchange.funding_rate ex eth : float)]
+  in
+  show ();
+  [%expect {| ((btc 1.25E-05) (eth 1.25E-05)) |}];
+  Exchange.set_funding_rate ex btc (-0.0001);
+  show ();
+  [%expect {| ((btc -0.0001) (eth 1.25E-05)) |}]
+;;
+
 let%test_unit "random order flow keeps books uncrossed and conserves value" =
   let gen =
     let open Quickcheck.Generator.Let_syntax in
