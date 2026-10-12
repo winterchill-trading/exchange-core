@@ -1,9 +1,11 @@
 (** Synthetic background order flow, so the simulated book is alive without external
     traders.
 
-    Each instrument has a reference price following a geometric random walk. On every tick
-    the walk advances, the exchange's mark is set to the reference price, and each of [N]
-    noise trader accounts may, per instrument:
+    Each instrument has a reference price following a geometric random walk, unless a
+    price anchor pins it or pulls it towards an external price ({!set_reference}). On
+    every tick the walk advances, the exchange's mark is set to the reference price, and
+    each noise trader account trading the instrument ({!set_noise_traders}; all
+    [Config.noise_traders] by default) may:
     - cancel its oldest resting order (always when it has more than
       [max_orders_per_symbol]);
     - post a GTC limit order a random distance from the reference price, bids below and
