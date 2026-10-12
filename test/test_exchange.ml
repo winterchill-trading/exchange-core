@@ -505,3 +505,133 @@ let%test_unit "random order flow keeps books uncrossed and conserves value" =
         (List.length listed)
         ~expect:(Order_book.length (Option.value_exn (Exchange.book ex btc))))
 ;;
+
+module Flow_op = struct
+  type t =
+    | Place of
+        { owner : int
+        ; side : Side.t
+        ; px : int (** tenths of a dollar *)
+        ; size : int (** hundredths *)
+        ; tif : Tif.t
+        }
+    | Market of
+        { owner : int
+        ; side : Side.t
+        ; size : int
+        }
+    | Cancel of
+        { owner : int
+        ; oid : int
+        }
+    | Step of { minutes : int }
+    | Set_mark of { px : int (** dollars *) }
+  [@@deriving sexp_of]
+
+  let quickcheck_generator =
+    let open Quickcheck.Generator.Let_syntax in
+    let owner = Int.gen_incl 1 3 in
+    let side = Quickcheck.Generator.of_list Side.all in
+    let size = Int.gen_incl 1 200 in
+    Quickcheck.Generator.weighted_union
+      [ ( 8.
+        , let%map owner and side and px = Int.gen_incl 9_980 10_020 and size
+          and tif = Quickcheck.Generator.of_list Tif.all in
+          Place { owner; side; px; size; tif } )
+      ; ( 1.
+        , let%map owner and side and size in
+          Market { owner; side; size } )
+      ; ( 2.
+        , let%map owner and oid = Int.gen_incl 1 120 in
+          Cancel { owner; oid } )
+      ; (1., Int.gen_incl 0 90 >>| fun minutes -> Step { minutes })
+      ; (1., Int.gen_incl 700 1300 >>| fun px -> Set_mark { px })
+      ]
+  ;;
+end
+
+let%expect_test "random flow with steps and marks: zero net position, uncrossed book, \
+                 unique ids"
+  =
+  let liquidations = ref 0
+  and fundings = ref 0
+  and fills = ref 0 in
+  Quickcheck.test
+    ~trials:200
+    ~sexp_of:[%sexp_of: Flow_op.t list]
+    (List.gen_with_length 120 Flow_op.quickcheck_generator)
+    ~f:(fun ops ->
+      let ex = Exchange.create () in
+      List.iter [ 1; 2; 3 ] ~f:(fun n -> Exchange.deposit ex (acct n) (usd "2000"));
+      let order_ids = ref [] in
+      let place n req =
+        let oid, (_ : Order_status.t) = Exchange.place_with_order_id ex (acct n) req in
+        order_ids := Order_id.to_int_exn oid :: !order_ids
+      in
+      List.iter ops ~f:(fun (op : Flow_op.t) ->
+        match op with
+        | Place { owner; side; px; size; tif } ->
+          place
+            owner
+            (Order_request.limit
+               ~tif
+               btc
+               side
+               ~px:(Price.of_units (px * 10_000_000))
+               ~size:(Size.of_units (size * 1_000_000)))
+        | Market { owner; side; size } ->
+          place
+            owner
+            (Order_request.market btc side ~size:(Size.of_units (size * 1_000_000)))
+        | Cancel { owner; oid } ->
+          ignore
+            (Exchange.cancel ex (acct owner) ~symbol:btc (Order_id.of_int oid)
+             : Cancel_status.t)
+        | Step { minutes } ->
+          Exchange.step ex ~now:(Exchange.now ex + (minutes * 60 * 1_000_000_000))
+        | Set_mark { px } -> Exchange.set_mark ex btc (Price.of_int px));
+      let events = Exchange.drain_events ex in
+      (* Uncrossed book. *)
+      let book = Option.value_exn (Exchange.book ex btc) in
+      Order_book.invariant book;
+      (match Order_book.best_bid book, Order_book.best_ask book with
+       | Some bid, Some ask -> assert (Price.( < ) bid ask)
+       | _ -> ());
+      (* Zero net position: every fill moves the same size between two accounts, and a
+         liquidation closes a position without a counterparty. *)
+      let positions =
+        List.concat_map [ 1; 2; 3 ] ~f:(fun n ->
+          (Exchange.account_view ex (acct n)).positions
+          |> List.map ~f:(fun (p : Position_view.t) -> p.size))
+      in
+      let liquidated =
+        List.filter_map events ~f:(function
+          | Liquidation { liquidation; _ } -> Some liquidation.size
+          | _ -> None)
+      in
+      [%test_result: Size.t] (Size.sum (positions @ liquidated)) ~expect:Size.zero;
+      (* Unique, increasing order ids; unique trade ids. *)
+      let order_ids = List.rev !order_ids in
+      assert (List.is_sorted_strictly order_ids ~compare:Int.compare);
+      let tids =
+        List.filter_map events ~f:(function
+          | Fill { fill; _ } -> Some (Trade_id.to_int fill.tid)
+          | _ -> None)
+      in
+      assert (not (List.contains_dup tids ~compare:Int.compare));
+      liquidations := !liquidations + List.length liquidated;
+      fills := !fills + List.length tids;
+      fundings
+      := !fundings
+         + List.count events ~f:(function
+           | Funding _ -> true
+           | _ -> false));
+  (* The flow does exercise liquidation and funding. *)
+  print_s
+    [%message
+      ""
+        ~fills:(!fills > 1000 : bool)
+        ~liquidations:(!liquidations > 0 : bool)
+        ~fundings:(!fundings > 100 : bool)];
+  [%expect {| ((fills true) (liquidations true) (fundings true)) |}]
+;;
