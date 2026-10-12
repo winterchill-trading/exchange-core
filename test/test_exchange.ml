@@ -213,6 +213,47 @@ let%expect_test "rejections" =
     |}]
 ;;
 
+let%expect_test "rejected orders get an order id" =
+  let ex = fresh () in
+  let place_and_show req =
+    let order_id, status = Exchange.place_with_order_id ex (acct 1) req in
+    let rejected =
+      List.filter_map (Exchange.drain_events ex) ~f:(function
+        | Order_rejected { order_id; reason; _ } -> Some (order_id, reason)
+        | _ -> None)
+    in
+    print_s
+      [%message
+        ""
+          (order_id : Order_id.t)
+          (status : Order_status.t)
+          (rejected : (Order_id.t option * Reject_reason.t) list)]
+  in
+  place_and_show (order Buy "100000" "0.000001");
+  place_and_show { (order Buy "1" "10") with symbol = Symbol.of_string "DOGE" };
+  place_and_show (order ~tif:Ioc Buy "100000" "0.01");
+  place_and_show (Order_request.market btc Sell ~size:(sz "0.01"));
+  place_and_show (order Sell "100000" "0.01");
+  ignore (Exchange.reject ex (acct 1) (Unsupported "trigger orders") : Order_status.t);
+  print_s [%sexp (Exchange.drain_events ex : Event.t list)];
+  [%expect
+    {|
+    ((order_id 1) (status (Rejected Invalid_size))
+     (rejected (((1) Invalid_size))))
+    ((order_id 2) (status (Rejected Unknown_symbol))
+     (rejected (((2) Unknown_symbol))))
+    ((order_id 3) (status (Rejected No_liquidity))
+     (rejected (((3) No_liquidity))))
+    ((order_id 4) (status (Rejected No_liquidity))
+     (rejected (((4) No_liquidity))))
+    ((order_id 5) (status (Resting (order_id 5) (client_order_id ())))
+     (rejected ()))
+    ((Order_rejected (account 0x0000000000000000000000000000000000000001)
+      (symbol ()) (order_id ()) (client_order_id ())
+      (reason (Unsupported "trigger orders")) (time 0)))
+    |}]
+;;
+
 let%expect_test "self-trade, IOC partial fill and market orders" =
   let ex = fresh () in
   place ex 1 Sell "100000" "0.01";
