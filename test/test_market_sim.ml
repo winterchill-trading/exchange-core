@@ -313,3 +313,60 @@ let%expect_test "an anchored stepped run replays bit for bit from its journal" =
         ~check_replay:(Stepped.check_replay stepped : unit Or_error.t)];
   [%expect {| ((inputs 3241) (events 2250) (identical true) (check_replay (Ok ()))) |}]
 ;;
+
+let%expect_test "per-symbol noise trader counts, replayed from the inputs" =
+  let eth = Symbol.of_string "ETH" in
+  let stepped =
+    Stepped.create
+      { Stepped.Config.default with
+        sim =
+          Some
+            { Market_sim.Config.default with
+              seed = 13
+            ; noise_traders = 3
+            ; symbols = [ btc; eth ]
+            }
+      }
+  in
+  let sim = Option.value_exn (Stepped.sim stepped) in
+  let exchange = Stepped.exchange stepped in
+  let show label =
+    let resting symbol =
+      List.map (Market_sim.traders sim) ~f:(fun trader ->
+        Exchange.open_orders exchange trader
+        |> List.count ~f:(fun (o : Open_order.t) -> Symbol.equal o.symbol symbol))
+    in
+    print_s
+      [%message
+        label
+          ~btc_traders:(Market_sim.noise_traders sim btc : int)
+          ~btc_resting_by_trader:(resting btc : int list)
+          ~eth_resting_by_trader:(resting eth : int list)]
+  in
+  Stepped.run stepped ~steps:50 ~f:(fun _ _ -> ());
+  show "default";
+  Market_sim.set_noise_traders sim btc 0;
+  show "btc switched off";
+  Stepped.run stepped ~steps:50 ~f:(fun _ _ -> ());
+  show "50 ticks later";
+  Market_sim.set_noise_traders sim btc 5;
+  Stepped.run stepped ~steps:50 ~f:(fun _ _ -> ());
+  show "five traders on btc";
+  Market_sim.set_noise_traders sim btc 1;
+  show "one trader on btc";
+  print_s [%message (Stepped.check_replay stepped : unit Or_error.t)];
+  [%expect
+    {|
+    (default (btc_traders 3) (btc_resting_by_trader (4 6 5))
+     (eth_resting_by_trader (5 6 5)))
+    ("btc switched off" (btc_traders 0) (btc_resting_by_trader (0 0 0))
+     (eth_resting_by_trader (5 6 5)))
+    ("50 ticks later" (btc_traders 0) (btc_resting_by_trader (0 0 0))
+     (eth_resting_by_trader (4 5 5)))
+    ("five traders on btc" (btc_traders 5) (btc_resting_by_trader (6 6 5 5 5))
+     (eth_resting_by_trader (5 3 5 0 0)))
+    ("one trader on btc" (btc_traders 1) (btc_resting_by_trader (6 0 0 0 0))
+     (eth_resting_by_trader (5 3 5 0 0)))
+    ("Stepped.check_replay stepped" (Ok ()))
+    |}]
+;;
