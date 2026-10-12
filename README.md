@@ -75,7 +75,7 @@ protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs
 | `Clearinghouse` | All accounts: fill settlement, per-instrument fees, initial and maintenance margin, liquidation, funding, `Account_view` |
 | `Execution` | One account's side of a fill (fill plus settlement), as kept in its history |
 | `Event` | Log entries: order accepted/rejected/filled/cancelled, fill, liquidation, funding |
-| `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place, cancel, modify, views, `set_mark`, `step`, `drain_events` |
+| `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place (`place_with_order_id` also returns the assigned id), cancel, modify, views, `set_mark`, `funding_rate` / `set_funding_rate`, `step`, `drain_events` |
 | `Market_sim` | Seeded random-walk reference prices, marks, and noise traders posting, cancelling and taking |
 
 ```ocaml
@@ -91,7 +91,10 @@ Exchange.drain_events ex
 
 - **Determinism.** Time is an `int` count of nanoseconds advanced by the caller with
   `Exchange.step`; the engine never reads the wall clock. Order ids and trade ids are
-  sequential. Front ends convert timestamps to their venue's unit.
+  sequential. Every `Exchange.place` takes an order id before validating, so rejected
+  orders and IOC or market orders that fill nothing consume one too; the id is in the
+  `Order_rejected` event and `Exchange.place_with_order_id` returns it. Rejections
+  recorded with `Exchange.reject` carry an id only if the front end passes one. Front ends convert timestamps to their venue's unit.
 - **Matching** is price-time priority with maker-price fills and self-trade prevention;
   see the [order-book](https://github.com/winterchill-trading/order-book) design notes.
   Market orders are IOC orders priced `slippage_bps` (default 5%) through the best
@@ -120,8 +123,8 @@ Exchange.drain_events ex
   balance leave a negative balance.
 - **Funding** is charged at each multiple of the funding interval (1 hour) crossed by
   `step`: every position pays `size * mark * rate`, so longs pay shorts when the rate is
-  positive. The rate is per instrument (`set_funding_rate`), default 0.00125%; it is not
-  derived from a premium index.
+  positive. The rate is per instrument (`set_funding_rate`, read back with
+  `funding_rate`), default 0.00125%; it is not derived from a premium index.
 - **Modify** cancels the target and places the replacement with a new order id (losing
   priority). If the replacement is rejected the original stays cancelled.
 - **Fixed point.** `Price`, `Size` and `Usd` count units of `10^-8` in an `int`.
@@ -130,6 +133,11 @@ Exchange.drain_events ex
   and truncate toward zero.
 - **Market simulation.** Each instrument's reference price is a geometric random walk
   with `vol_bps` volatility per second, stepped once per `tick`; the mark follows it.
+  Starting prices come from `initial_prices`, keyed by symbol; unlisted symbols use
+  `Config.default_price`, which recognises BTC, ETH and SOL by prefix (`BTC`, `BTCUSDT`
+  and `BTC-PERP` all start at 100000) and starts anything else at 100. Order notionals
+  ($20 to $2000 by default) are scaled up per instrument when one lot is worth more than
+  the minimum, and sizes never round below one lot, so coarse size steps still trade.
   Noise traders (accounts `0xffff...ff0000000N`, $10M each) post GTC orders up to 25 bps
   from the reference, cancel old ones and occasionally send market orders. Prices are
   rounded with `Instrument.round_price`. Runs are reproducible for a seed, given the
