@@ -21,7 +21,8 @@ jobs:
       - run: opam pin add fixed-decimal https://github.com/winterchill-trading/fixed-decimal.git --no-action --yes
       - run: opam pin add exchange-core . --no-action --yes
       - run: opam pin add order-book https://github.com/winterchill-trading/order-book.git --no-action --yes
-      - run: opam install ./exchange-core.opam --with-test --yes
+      # No --with-test here: the shared test directory also needs order-book and the engine.
+      - run: opam install ./exchange-core.opam --yes
       - run: opam install ./exchange-core-engine.opam --deps-only --with-test --yes
       - run: opam exec -- dune build --only-packages exchange-core-engine @install
       - run: opam exec -- dune build --only-packages exchange-core-engine @runtest
