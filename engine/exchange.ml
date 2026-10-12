@@ -40,12 +40,7 @@ module Config = struct
   ;;
 end
 
-module Target = struct
-  type t =
-    | Order_id of Order_id.t
-    | Client_order_id of Client_order_id.t
-  [@@deriving sexp, compare, equal]
-end
+module Target = Target
 
 type t =
   { config : Config.t

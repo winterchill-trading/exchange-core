@@ -83,12 +83,7 @@ val cancel_by_client_order_id
   -> Client_order_id.t
   -> Cancel_status.t
 
-module Target : sig
-  type t =
-    | Order_id of Order_id.t
-    | Client_order_id of Client_order_id.t
-  [@@deriving sexp, compare, equal]
-end
+module Target = Target
 
 (** Cancels the target order (in any symbol) and places the replacement with a new order
     id, losing time priority. If the target is not a resting order of the account the
