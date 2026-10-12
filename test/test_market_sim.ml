@@ -59,3 +59,66 @@ let%expect_test "same seed, same run" =
   print_s [%sexp ([%equal: (Symbol.t * Price.t) list] (digest 3) (digest 4) : bool)];
   [%expect {| false |}]
 ;;
+
+let%expect_test "default prices recognise the base asset by prefix" =
+  List.map
+    [ "BTC"; "BTCUSDT"; "BTC-PERP"; "eth"; "ETHUSDT"; "SOL-PERP"; "DOGE" ]
+    ~f:Symbol.of_string
+  |> Market_sim.Config.default_prices
+  |> [%sexp_of: (Symbol.t * Price.t) list]
+  |> print_s;
+  [%expect
+    {|
+    ((BTC 100000) (BTCUSDT 100000) (BTC-PERP 100000) (eth 3500) (ETHUSDT 3500)
+     (SOL-PERP 150) (DOGE 100))
+    |}]
+;;
+
+let%expect_test "coarse lot sizes and unlisted symbols still trade" =
+  let instrument name size_decimals tick =
+    Instrument.create
+      (Symbol.of_string name)
+      ~size_decimals
+      ~price_tick:(Price.of_string tick)
+      ~max_leverage:20
+  in
+  let instruments =
+    [ instrument "BTCUSDT" 3 "0.1"
+    ; instrument "ETHUSDT" 2 "0.01"
+    ; instrument "SOLUSDT" 0 "0.01"
+    ]
+  in
+  let exchange =
+    Exchange.create ~config:{ Exchange.Config.default with instruments } ()
+  in
+  let sim =
+    Market_sim.create
+      { Market_sim.Config.default with initial_prices = []; noise_traders = 4 }
+      exchange
+  in
+  let sizes = Symbol.Table.create () in
+  for i = 1 to 100 do
+    Market_sim.tick sim;
+    Exchange.step exchange ~now:(i * 100_000_000);
+    List.iter (Exchange.drain_events exchange) ~f:(function
+      | Order_accepted { order; _ } ->
+        Hashtbl.update sizes order.symbol ~f:(fun prev ->
+          let lo, hi = Option.value prev ~default:(order.size, order.size) in
+          Size.min lo order.size, Size.max hi order.size)
+      | Order_rejected { reason = Invalid_size; _ } -> print_endline "invalid size"
+      | _ -> ())
+  done;
+  List.iter instruments ~f:(fun i ->
+    print_s
+      [%message
+        ""
+          ~symbol:(i.symbol : Symbol.t)
+          ~reference:(Market_sim.reference_price sim i.symbol : Price.t option)
+          ~accepted_size_range:(Hashtbl.find sizes i.symbol : (Size.t * Size.t) option)]);
+  [%expect
+    {|
+    ((symbol BTCUSDT) (reference (99840)) (accepted_size_range ((0.003 0.099))))
+    ((symbol ETHUSDT) (reference (3496.39)) (accepted_size_range ((0.01 0.99))))
+    ((symbol SOLUSDT) (reference (150.06)) (accepted_size_range ((1 98))))
+    |}]
+;;
