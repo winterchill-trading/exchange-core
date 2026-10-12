@@ -146,5 +146,12 @@ val apply : t -> Input.t -> unit
 (** Returns the events since the previous call, oldest first, and forgets them. *)
 val drain_events : t -> Event.t list
 
+(** [drain_events] with each event's sequence number. Numbers start at 1 and have no
+    gaps, so a consumer can detect a lost event. *)
+val drain_numbered_events : t -> Event.Numbered.t list
+
+(** Sequence number the next event will get. *)
+val next_event_seq : t -> int
+
 (** The order book of an instrument, for inspection. *)
 val book : t -> Symbol.t -> Order_book.t option

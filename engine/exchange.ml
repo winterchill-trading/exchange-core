@@ -52,7 +52,8 @@ type t =
   ; owner_orders : Symbol.t Order_id.Table.t Account.Table.t (** owner -> oid -> symbol *)
   ; client_ids : Order_id.t Client_order_id.Table.t Account.Table.t
   ; fills : Execution.t list Account.Table.t (** newest first *)
-  ; events : Event.t Queue.t
+  ; events : Event.Numbered.t Queue.t
+  ; mutable next_seq : int
   ; mutable recorders : (Input.t -> unit) list (** oldest first *)
   ; mutable time : int
   ; mutable next_oid : int
@@ -75,6 +76,7 @@ let create ?(config = Config.default) () =
   ; client_ids = Account.Table.create ()
   ; fills = Account.Table.create ()
   ; events = Queue.create ()
+  ; next_seq = 1
   ; recorders = []
   ; time = 0
   ; next_oid = 1
@@ -88,16 +90,25 @@ let instruments t = t.config.instruments
 let instrument t symbol = Instrument.find t.config.instruments symbol
 let clearinghouse t = t.clearinghouse
 let now t = t.time
-let emit t event = Queue.enqueue t.events event
+let emit t event =
+  Queue.enqueue t.events { Event.Numbered.seq = t.next_seq; event };
+  t.next_seq <- t.next_seq + 1
+;;
 let record_inputs t ~f = t.recorders <- t.recorders @ [ f ]
 
 (* Reports a request that has been performed to the input recorders. *)
 let record t input = List.iter t.recorders ~f:(fun f -> f input)
 
-let drain_events t =
+let next_event_seq t = t.next_seq
+
+let drain_numbered_events t =
   let events = Queue.to_list t.events in
   Queue.clear t.events;
   events
+;;
+
+let drain_events t =
+  List.map (drain_numbered_events t) ~f:(fun (e : Event.Numbered.t) -> e.event)
 ;;
 
 let book t symbol = Hashtbl.find t.books symbol

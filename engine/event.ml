@@ -75,3 +75,13 @@ let executions = function
     Some ({ Execution.fill; settlement = taker }, { Execution.fill; settlement = maker })
   | _ -> None
 ;;
+
+module Numbered = struct
+  type event = t [@@deriving sexp_of]
+
+  type t =
+    { seq : int
+    ; event : event
+    }
+  [@@deriving sexp_of]
+end

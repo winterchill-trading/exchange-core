@@ -69,3 +69,14 @@ val book_symbol : t -> Symbol.t option
 
 (** The two executions of a [Fill] event, [(taker, maker)]. *)
 val executions : t -> (Execution.t * Execution.t) option
+
+(** An event with its position in the exchange's event log. *)
+module Numbered : sig
+  type event := t
+
+  type t =
+    { seq : int (** 1 for the first event of an exchange, then consecutive *)
+    ; event : event
+    }
+  [@@deriving sexp_of]
+end
