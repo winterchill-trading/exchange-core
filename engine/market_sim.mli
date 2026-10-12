@@ -74,7 +74,8 @@ val create : Config.t -> Exchange.t -> t
 
 val config : t -> Config.t
 
-(** The noise trader accounts: ["0x"], 32 [f]s, then the trader index in 8 hex digits. *)
+(** The noise trader accounts created so far, by index: ["0x"], 32 [f]s, then the trader
+    index in 8 hex digits. *)
 val traders : t -> Account.t list
 
 (** The reference price rounded to a valid price of the instrument. *)
@@ -105,6 +106,19 @@ val set_reference : ?half_life:Time_ns.Span.t -> t -> Symbol.t -> Price.t -> uni
 
 (** Returns the symbol to its free random walk, starting from the current reference. *)
 val clear_reference : t -> Symbol.t -> unit
+
+(** {2 Noise traders per symbol} *)
+
+(** Number of noise traders trading the symbol; [Config.noise_traders] until changed. *)
+val noise_traders : t -> Symbol.t -> int
+
+(** [set_noise_traders t symbol n] makes traders [0] to [n - 1] trade [symbol] from the
+    next tick; [0] stops noise flow in it. Traders beyond the ones created so far are
+    created and funded with [trader_balance] (recorded as deposits), and traders that stop
+    trading the symbol cancel their resting orders in it, oldest first. Like
+    {!set_reference}, it acts through ordinary exchange calls, so journals replay it.
+    Raises if the symbol is not simulated or [n] is negative. *)
+val set_noise_traders : t -> Symbol.t -> int -> unit
 
 (** Advances the walk one tick and generates that tick's orders. Does not move the
     exchange clock. *)

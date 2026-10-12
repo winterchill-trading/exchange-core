@@ -84,6 +84,7 @@ module Market = struct
     ; mutable pull : float
     (** fraction of [anchor - reference] added each tick; [0.] pins the reference to the
         anchor instead of walking *)
+    ; mutable noise_traders : int (** traders [0 .. noise_traders - 1] trade it *)
     }
 
   let symbol t = t.instrument.symbol
@@ -94,7 +95,7 @@ type t =
   ; exchange : Exchange.t
   ; random : Random.State.t
   ; markets : Market.t list
-  ; traders : Account.t list
+  ; mutable traders : Account.t list (** in index order *)
   ; sigma : float (** per-tick standard deviation of log returns *)
   }
 
@@ -117,7 +118,12 @@ let create (config : Config.t) exchange =
           |> Option.value_or_thunk ~default:(fun () -> Config.default_price symbol)
           |> Price.to_float
         in
-        { Market.instrument; reference; anchor = None; pull = 0. }
+        { Market.instrument
+        ; reference
+        ; anchor = None
+        ; pull = 0.
+        ; noise_traders = config.noise_traders
+        }
       | None -> raise_s [%message "Market_sim: unknown symbol" (symbol : Symbol.t)])
   in
   let traders = List.init config.noise_traders ~f:trader_account in
@@ -177,6 +183,30 @@ let set_reference ?half_life t symbol px =
             (half_life : Time_ns.Span.t)];
     let ticks = Time_ns.Span.(half_life // t.config.tick_interval) in
     m.pull <- 1. -. (0.5 ** (1. /. ticks))
+;;
+
+let noise_traders t symbol = (market_exn t symbol).noise_traders
+
+let set_noise_traders t symbol n =
+  let m = market_exn t symbol in
+  if n < 0
+  then raise_s [%message "Market_sim.set_noise_traders: negative count" (n : int)];
+  let have = List.length t.traders in
+  if n > have
+  then (
+    let added = List.init (n - have) ~f:(fun i -> trader_account (have + i)) in
+    List.iter added ~f:(fun a -> Exchange.deposit t.exchange a t.config.trader_balance);
+    t.traders <- t.traders @ added);
+  (* Traders leaving the symbol take their resting orders with them. *)
+  List.iteri t.traders ~f:(fun i trader ->
+    if i >= n && i < m.noise_traders
+    then
+      Exchange.open_orders t.exchange trader
+      |> List.filter ~f:(fun (o : Open_order.t) -> Symbol.equal o.symbol symbol)
+      |> List.rev
+      |> List.iter ~f:(fun (o : Open_order.t) ->
+        ignore (Exchange.cancel t.exchange trader ~symbol o.order_id : Cancel_status.t)));
+  m.noise_traders <- n
 ;;
 
 let clear_reference t symbol =
@@ -307,10 +337,12 @@ let tick t =
        then m.reference <- anchor
        else m.reference <- (m.reference *. step) +. (m.pull *. (anchor -. m.reference)));
     set_mark t m);
-  List.iter t.traders ~f:(fun trader ->
-    List.iter t.markets ~f:(fun m ->
-      cancel_oldest t trader m;
-      post t trader m;
-      inside_touch t trader m;
-      market t trader m))
+  List.iteri t.traders ~f:(fun i trader ->
+    List.iter t.markets ~f:(fun (m : Market.t) ->
+      if i < m.noise_traders
+      then (
+        cancel_oldest t trader m;
+        post t trader m;
+        inside_touch t trader m;
+        market t trader m)))
 ;;
