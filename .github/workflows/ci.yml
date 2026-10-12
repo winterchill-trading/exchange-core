@@ -12,7 +12,7 @@ jobs:
         with:
           ocaml-compiler: ocaml-variants.5.2.0+ox
           opam-repositories: |
-            ox: https://github.com/oxcaml/opam-repository.git
+            ox: https://github.com/oxcaml/opam-repository.git#afddc8337950dbc02863fe30ae58735a1cf2719f
             default: https://github.com/ocaml/opam-repository.git
       # Two packages live here and exchange-core-engine depends on order-book,
       # which depends on exchange-core. Install exchange-core from this checkout
