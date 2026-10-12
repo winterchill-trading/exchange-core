@@ -8,21 +8,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: ocaml-variants.5.2.0+ox
-          opam-repositories: |
-            ox: https://github.com/oxcaml/opam-repository.git#afddc8337950dbc02863fe30ae58735a1cf2719f
-            default: https://github.com/ocaml/opam-repository.git
       # Two packages live here and exchange-core-engine depends on order-book,
-      # which depends on exchange-core. Install exchange-core from this checkout
-      # first, then build only the engine package so dune uses the installed
-      # copy instead of seeing two exchange-core libraries.
-      - run: opam pin add fixed-decimal https://github.com/winterchill-trading/fixed-decimal.git --no-action --yes
-      - run: opam pin add exchange-core . --no-action --yes
-      - run: opam pin add order-book https://github.com/winterchill-trading/order-book.git --no-action --yes
-      # No --with-test here: the shared test directory also needs order-book and the engine.
-      - run: opam install ./exchange-core.opam --yes
-      - run: opam install ./exchange-core-engine.opam --deps-only --with-test --yes
+      # which depends on exchange-core, so `--deps-only` over both opam files
+      # would need exchange-core installed first. The cached switch is built
+      # for the engine's opam file alone (exchange-core and order-book come in
+      # as pins); afterwards exchange-core is re-pinned to this checkout, which
+      # rebuilds order-book against it, and only the engine package is built so
+      # dune uses the installed copy instead of seeing two exchange-core
+      # libraries.
+      - run: mkdir -p _ox-engine && cp exchange-core-engine.opam _ox-engine/
+      - uses: winterchill-trading/infra/.github/actions/ox-setup@main
+        with:
+          working-directory: _ox-engine
+          pins: |
+            fixed-decimal https://github.com/winterchill-trading/fixed-decimal.git
+            exchange-core https://github.com/winterchill-trading/exchange-core.git
+            order-book https://github.com/winterchill-trading/order-book.git
+      - run: opam pin add exchange-core . --yes
       - run: opam exec -- dune build --only-packages exchange-core-engine @install
       - run: opam exec -- dune build --only-packages exchange-core-engine @runtest
