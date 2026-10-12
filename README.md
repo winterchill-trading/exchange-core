@@ -84,7 +84,7 @@ protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs
 | `Input` | Every mutating request as a value, with a `bin_prot` encoding |
 | `Journal` | Writes inputs to a binary file, loads them and replays them into a fresh exchange |
 | `Book_replay` | Rebuilds order books from numbered events alone (as a feed consumer would), with gap detection |
-| `Market_sim` | Seeded random-walk reference prices, marks, and noise traders posting, cancelling, quoting inside the spread and taking; `Config.randomize ~seed` |
+| `Market_sim` | Seeded random-walk reference prices, marks, and noise traders posting, cancelling, quoting inside the spread and taking; `Config.randomize ~seed`; external reference prices (`set_reference`) and per-symbol noise trader counts (`set_noise_traders`) |
 | `Stepped` | Deterministic stepped harness: exchange plus simulation advanced one step at a time, a strategy reacting to each step's events, every input recorded and checkable by replay |
 
 ```ocaml
@@ -134,6 +134,32 @@ Each step ticks the simulation, advances the clock by `step_ns` (100ms by defaul
 returns that step's numbered events; the strategy's requests take effect immediately and
 their events arrive with the next step. `check_replay` replays all recorded inputs into a
 fresh exchange and reports the first event that differs.
+
+## Anchoring the simulation to a reference market
+
+The price anchor (see the specs repository, `design/price-anchor.md`) ties a simulated
+symbol to another market through two `Market_sim` calls:
+
+```ocaml
+Market_sim.set_reference sim btc px;                       (* pin: reference and mark = px *)
+Market_sim.set_reference sim btc px
+  ~half_life:(Time_ns.Span.of_sec 1.);                     (* pull the walk towards px *)
+Market_sim.clear_reference sim btc;                        (* back to the free walk *)
+Market_sim.set_noise_traders sim btc 0                     (* no noise flow in btc *)
+```
+
+Without a half-life the walk stops and the noise traders quote around `px`. With one,
+each tick the reference moves by its random step plus `k * (px - reference)`, with
+`k = 1 - 0.5 ** (tick_interval / half_life)`; without noise the gap halves every
+half-life (the test measures 5000, 2500, 1250 after 10, 20, 30 ticks of a 1 s half-life at
+100 ms ticks). The random step is drawn for every symbol on every tick, so anchoring one
+symbol leaves the others' random numbers unchanged.
+
+`set_noise_traders` makes traders `0 .. n-1` trade the symbol from the next tick,
+creating and funding new traders as needed and cancelling the resting orders of those
+that stop. Both calls reach the exchange only through ordinary calls (`set_mark`,
+`deposit`, `cancel`, `place`), so they are recorded as existing `Input.t` values: journals
+keep their format and an anchored run replays bit for bit.
 
 ## Design notes
 
@@ -198,9 +224,10 @@ fresh exchange and reports the first event that differs.
 ## Tests
 
 `dune test` runs expect tests (instrument rules, fees, PnL, liquidation, funding,
-exchange flows, a seeded market simulation, a text trace of book, margin and accounts
-per step, journal round trips and replays, books rebuilt from events, the stepped
-harness) and `Base_quickcheck` properties: balances plus unrealised PnL plus fees are
-conserved, books never cross, and every resting order is listed once in its owner's open
-orders; with steps and mark moves mixed in, positions net to zero once liquidated sizes
+exchange flows, a seeded market simulation, pinned and mean-reverting reference prices,
+per-symbol noise trader counts, a text trace of book, margin and accounts per step,
+journal round trips and replays, books rebuilt from events, the stepped harness) and
+`Base_quickcheck` properties: balances plus unrealised PnL plus fees are conserved, books
+never cross, and every resting order is listed once in its owner's open orders; with
+steps and mark moves mixed in, positions net to zero once liquidated sizes
 are counted, and order and trade ids are unique.
