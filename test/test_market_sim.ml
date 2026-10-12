@@ -201,3 +201,115 @@ let%expect_test "randomized configs run and keep the book uncrossed" =
     ((seed 3) (spread 0.67))
     |}]
 ;;
+
+let btc = Symbol.of_string "BTC"
+
+let%expect_test "set_reference without a half-life pins the reference and the mark" =
+  let exchange = Exchange.create () in
+  let sim =
+    Market_sim.create
+      { Market_sim.Config.default with seed = 5; noise_traders = 3 }
+      exchange
+  in
+  for _ = 1 to 10 do
+    Market_sim.tick sim
+  done;
+  Market_sim.set_reference sim btc (Price.of_string "101234.5");
+  let show () =
+    print_s
+      [%message
+        ""
+          ~reference:(Market_sim.reference_price sim btc : Price.t option)
+          ~mark:(Exchange.mark exchange btc : Price.t option)]
+  in
+  show ();
+  for _ = 1 to 20 do
+    Market_sim.tick sim
+  done;
+  show ();
+  Market_sim.clear_reference sim btc;
+  for _ = 1 to 20 do
+    Market_sim.tick sim
+  done;
+  show ();
+  [%expect
+    {|
+    ((reference (101234.5)) (mark (101234.5)))
+    ((reference (101234.5)) (mark (101234.5)))
+    ((reference (101170.2)) (mark (101170.2)))
+    |}]
+;;
+
+let%expect_test "with a half-life the walk converges towards the anchor" =
+  let gaps ~vol_bps =
+    let exchange = Exchange.create () in
+    let sim =
+      Market_sim.create
+        { Market_sim.Config.default with seed = 5; noise_traders = 0; vol_bps }
+        exchange
+    in
+    let anchor = Price.of_int 110_000 in
+    (* 100ms ticks, so a 1s half-life is 10 ticks. *)
+    Market_sim.set_reference sim btc anchor ~half_life:(Time_ns.Span.of_sec 1.);
+    List.map [ 10; 10; 10; 30; 140 ] ~f:(fun n ->
+      for _ = 1 to n do
+        Market_sim.tick sim
+      done;
+      let reference = Option.value_exn (Market_sim.reference_price sim btc) in
+      Float.iround_nearest_exn (Price.to_float (Price.( - ) anchor reference)))
+  in
+  print_s
+    [%message
+      "gap to the anchor after 10, 20, 30, 60 and 200 ticks"
+        ~no_noise:(gaps ~vol_bps:0. : int list)
+        ~default_noise:(gaps ~vol_bps:5. : int list)];
+  [%expect
+    {|
+    ("gap to the anchor after 10, 20, 30, 60 and 200 ticks"
+     (no_noise (5000 2500 1250 156 0)) (default_noise (5028 2434 1192 96 -61)))
+    |}]
+;;
+
+let%expect_test "an anchored stepped run replays bit for bit from its journal" =
+  let path = "test_market_sim_anchor.bin" in
+  let journal = Journal.create path in
+  let stepped =
+    Stepped.create
+      ~journal
+      { Stepped.Config.default with
+        sim = Some { Market_sim.Config.default with seed = 21; noise_traders = 4 }
+      }
+  in
+  let sim = Option.value_exn (Stepped.sim stepped) in
+  Stepped.run stepped ~steps:300 ~f:(fun t _ ->
+    match Stepped.steps t with
+    | 50 -> Market_sim.set_reference sim btc (Price.of_int 100_500)
+    | 100 ->
+      Market_sim.set_reference
+        sim
+        btc
+        (Price.of_int 99_000)
+        ~half_life:(Time_ns.Span.of_int_ms 500)
+    | 200 -> Market_sim.clear_reference sim btc
+    | _ -> ());
+  Journal.close journal;
+  let inputs = Journal.load path |> ok_exn in
+  Stdlib.Sys.remove path;
+  let replayed = Journal.replay inputs in
+  let original =
+    List.map (Stepped.events stepped) ~f:(fun e -> Event.sexp_of_t e.event)
+  in
+  let replayed_events =
+    List.take
+      (List.map (Exchange.drain_events replayed) ~f:Event.sexp_of_t)
+      (List.length original)
+  in
+  print_s
+    [%message
+      ""
+        ~inputs:(List.length inputs : int)
+        ~events:(List.length original : int)
+        ~identical:([%equal: Sexp.t list] original replayed_events : bool)
+        ~check_replay:(Stepped.check_replay stepped : unit Or_error.t)];
+  [%expect {| ((inputs 3241) (events 2250) (identical true) (check_replay (Ok ()))) |}]
+;;
