@@ -14,7 +14,8 @@ open! Exchange_core
 
 type t
 
-(** Empty books for [symbols]. [next_seq] defaults to 1, the first event of an exchange. *)
+(** Empty books for [symbols]. [next_seq] defaults to 1, the first event of an
+    exchange. *)
 val create : ?next_seq:int -> Symbol.t list -> t
 
 (** Sequence number of the next expected event. *)

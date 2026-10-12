@@ -213,7 +213,8 @@ let to_wire : t -> Wire.t =
   let s = Symbol.to_string in
   function
   | Deposit { account; usd } -> Deposit (a account, Usd.to_units usd)
-  | Set_leverage { account; symbol; leverage } -> Set_leverage (a account, s symbol, leverage)
+  | Set_leverage { account; symbol; leverage } ->
+    Set_leverage (a account, s symbol, leverage)
   | Place { account; request } -> Place (a account, request_to_wire request)
   | Reject { account; symbol; order_id; client_order_id; reason } ->
     Reject

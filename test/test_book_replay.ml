@@ -3,7 +3,9 @@ open! Exchange_core
 open! Exchange_core_engine
 open Helpers
 
-let symbols ex = List.map (Exchange.instruments ex) ~f:(fun (i : Instrument.t) -> i.symbol)
+let symbols ex =
+  List.map (Exchange.instruments ex) ~f:(fun (i : Instrument.t) -> i.symbol)
+;;
 
 let%expect_test "books rebuilt from drained events match the exchange after every tick" =
   let ex = Exchange.create () in
