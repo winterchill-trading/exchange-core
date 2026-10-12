@@ -14,6 +14,7 @@ module Config = struct
     ; post_probability : float
     ; cancel_probability : float
     ; market_probability : float
+    ; inside_touch_probability : float
     ; max_offset_bps : float
     ; min_notional : float
     ; max_notional : float
@@ -45,6 +46,7 @@ module Config = struct
     ; post_probability = 0.3
     ; cancel_probability = 0.1
     ; market_probability = 0.02
+    ; inside_touch_probability = 0.
     ; max_offset_bps = 25.
     ; min_notional = 20.
     ; max_notional = 2000.
@@ -193,6 +195,34 @@ let market t trader (m : Market.t) =
          : Order_status.t))
 ;;
 
+(* A GTC order strictly between the best bid and ask, when the spread is wider than one
+   tick, so the touch keeps tightening as well as being refilled from outside. *)
+let inside_touch t trader (m : Market.t) =
+  if Float.(t.config.inside_touch_probability > 0.)
+     && chance t t.config.inside_touch_probability
+  then (
+    let symbol = Market.symbol m in
+    let touch =
+      Option.bind (Exchange.book t.exchange symbol) ~f:(fun b ->
+        Option.both (Order_book.best_bid b) (Order_book.best_ask b))
+    in
+    match touch with
+    | None -> ()
+    | Some (bid, ask) ->
+      let side = random_side t in
+      let px =
+        Instrument.round_price
+          m.instrument
+          (uniform t (Price.to_float bid) (Price.to_float ask))
+      in
+      if Price.( > ) px bid && Price.( < ) px ask
+      then (
+        let size = random_size t m ~px:(Price.to_float px) in
+        ignore
+          (Exchange.place t.exchange trader (Order_request.limit symbol side ~px ~size)
+           : Order_status.t)))
+;;
+
 let tick t =
   List.iter t.markets ~f:(fun m ->
     m.reference <- m.reference *. Float.exp (t.sigma *. gaussian t);
@@ -204,5 +234,6 @@ let tick t =
     List.iter t.markets ~f:(fun m ->
       cancel_oldest t trader m;
       post t trader m;
+      inside_touch t trader m;
       market t trader m))
 ;;

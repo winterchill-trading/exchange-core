@@ -8,6 +8,8 @@
       [max_orders_per_symbol]);
     - post a GTC limit order a random distance from the reference price, bids below and
       asks above it (resting orders left behind by the walk cross and trade);
+    - post a GTC limit order strictly inside the spread
+      ([Config.inside_touch_probability]);
     - send a small market order.
 
     All randomness comes from a [Random.State.t] seeded with [Config.seed], and the
@@ -31,6 +33,10 @@ module Config : sig
     ; post_probability : float (** per trader, instrument and tick *)
     ; cancel_probability : float
     ; market_probability : float
+    ; inside_touch_probability : float
+    (** per trader, instrument and tick: post a GTC order strictly inside the spread when
+        it is wider than one tick. At [0.] no random number is drawn for it, so runs match
+        those of configurations without this field. *)
     ; max_offset_bps : float (** limit orders rest up to this far from the reference *)
     ; min_notional : float
     (** USD size range of an order. Per instrument, both bounds are scaled up by the same
@@ -51,7 +57,7 @@ module Config : sig
   (** Seed 0, all instruments, [default_prices] of {!Exchange.Config.default_instruments},
       5 bps/s, 10 traders with $10M each, 100ms ticks, up to 5 orders per instrument per
       trader, probabilities 0.3 / 0.1 / 0.02, offsets up to 25 bps, $20 to $2000 per
-      order. *)
+      order, no inside-touch orders. *)
   val default : t
 end
 
