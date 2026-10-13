@@ -174,11 +174,48 @@ let order_margin t account ~symbol ~side ~px ~sz =
   Usd.div_int (Notional.mul px increase) (leverage t account symbol)
 ;;
 
+let state_leverage t (state : Account_state.t) symbol =
+  Hashtbl.find_and_call1
+    state.leverage
+    symbol
+    ~a:(Int.min t.default_leverage (max_leverage t symbol))
+    ~if_found:(fun lev _ -> lev)
+    ~if_not_found:(fun _ default -> default)
+;;
+
+let rec free_margin_loop t state ~mark acc = function
+  | [] -> acc
+  | (p : Position.t) :: rest ->
+    let acc =
+      if Position.is_flat p
+      then acc
+      else (
+        let px = mark_of ~mark p in
+        Usd.( - )
+          (Usd.( + ) acc (Position.unrealized_pnl p ~mark:px))
+          (Usd.div_int
+             (Usd.abs (Position.notional p ~mark:px))
+             (state_leverage t state p.symbol)))
+    in
+    free_margin_loop t state ~mark acc rest
+;;
+
+(* [equity - margin_used] in one pass over the positions without building position lists;
+   fixed-point sums are exact, so it equals the difference of the two. *)
+let free_margin t account ~mark =
+  Hashtbl.find_and_call2
+    t.accounts
+    account
+    ~a:t
+    ~b:mark
+    ~if_found:(fun (state : Account_state.t) t mark ->
+      free_margin_loop t state ~mark state.balance state.position_list)
+    ~if_not_found:(fun _ _ _ -> Usd.zero)
+;;
+
 let check_order_margin t account ~symbol ~side ~px ~sz ~reserved ~mark =
   let required = order_margin t account ~symbol ~side ~px ~sz in
-  let available =
-    Usd.( - ) (Usd.( - ) (equity t account ~mark) (margin_used t account ~mark)) reserved
-  in
+  let available = Usd.( - ) (free_margin t account ~mark) reserved in
   if Usd.( <= ) required available
   then Ok ()
   else
