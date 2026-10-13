@@ -21,7 +21,9 @@ let%expect_test "minor words per call" =
   let ex = Scenario.create () in
   List.iter
     [ "step", Scenario.step ex, [ 17 ]
-    ; "submit IOC buy+sell", Scenario.match_round_trip ex, [ 460; 474 ]
+    ; (* Two words above the earlier 460/474: the book result gained an
+         [expired_makers] field (one word per submit). *)
+      "submit IOC buy+sell", Scenario.match_round_trip ex, [ 462; 476 ]
     ; "submit+cancel", Scenario.place_and_cancel ex, [ 335; 342 ]
     ; "maker submit+cancel", Scenario.maker_place_and_cancel ex, [ 338; 345 ]
     ; ( "quoter submit+cancel"
