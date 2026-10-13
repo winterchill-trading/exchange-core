@@ -1,0 +1,11 @@
+(executable
+ (name main)
+ (libraries
+  core
+  core_unix.command_unix
+  core_bench
+  exchange-core
+  exchange-core-engine
+  exchange_core_bench_scenario)
+ (preprocess
+  (pps ppx_jane)))
