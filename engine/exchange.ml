@@ -11,7 +11,6 @@ module Config = struct
     ; min_order_value : Usd.t
     ; market_slippage_bps : int
     ; l2_levels : int
-    ; premium_funding : Premium_funding.Config.t
     }
   [@@deriving sexp_of]
 
@@ -37,7 +36,6 @@ module Config = struct
     ; min_order_value = Usd.of_int 10
     ; market_slippage_bps = 500
     ; l2_levels = 20
-    ; premium_funding = Premium_funding.Config.default
     }
   ;;
 end
@@ -77,6 +75,7 @@ end
 
 type t =
   { config : Config.t
+  ; premium_funding : Premium_funding.Config.t
   ; self_trade : Order_book.Stp.t
   ; clearinghouse : Clearinghouse.t
   ; books : Order_book.t Symbol.Table.t
@@ -102,7 +101,12 @@ type t =
   ; mutable next_funding : int
   }
 
-let create ?(config = Config.default) ?(self_trade = Order_book.Stp.default) () =
+let create
+  ?(config = Config.default)
+  ?(self_trade = Order_book.Stp.default)
+  ?(premium_funding = Premium_funding.Config.default)
+  ()
+  =
   let books = Symbol.Table.create () in
   let trade_ids = ref 1 in
   let next_tid () =
@@ -113,6 +117,7 @@ let create ?(config = Config.default) ?(self_trade = Order_book.Stp.default) () 
   List.iter config.instruments ~f:(fun i ->
     Hashtbl.set books ~key:i.symbol ~data:(Order_book.create ~stp:self_trade i.symbol));
   { config
+  ; premium_funding
   ; self_trade
   ; clearinghouse =
       Clearinghouse.create ~default_leverage:config.default_leverage config.instruments
@@ -921,7 +926,7 @@ let funding_rate t symbol =
      | None -> t.config.default_funding_rate
      | Some premiums ->
        Premium_funding.rate
-         t.config.premium_funding
+         t.premium_funding
          ~average_premium:(Premiums.average premiums)
          ~interval:(Time_ns.Span.of_int_ns t.config.funding_interval_ns))
 ;;
@@ -960,7 +965,7 @@ let impact_pxs t symbol =
     Premium_funding.impact_pxs
       ~bids:(levels bids)
       ~asks:(levels asks)
-      ~notional:(Premium_funding.Config.impact_notional t.config.premium_funding symbol)
+      ~notional:(Premium_funding.Config.impact_notional t.premium_funding symbol)
 ;;
 
 let premium t symbol =
@@ -983,7 +988,7 @@ let set_oracle_internal t symbol px =
   match instrument t symbol with
   | None -> ()
   | Some instrument ->
-    let interval = Time_ns.Span.to_int_ns t.config.premium_funding.sample_interval in
+    let interval = Time_ns.Span.to_int_ns t.premium_funding.sample_interval in
     if Hashtbl.is_empty t.oracles
     then t.next_premium_sample <- ((t.time / interval) + 1) * interval;
     Hashtbl.set t.oracles ~key:symbol ~data:px;
@@ -1023,8 +1028,7 @@ let step t ~now =
       t.time <- t.next_premium_sample;
       sample_premiums t;
       t.next_premium_sample
-      <- t.next_premium_sample
-         + Time_ns.Span.to_int_ns t.config.premium_funding.sample_interval)
+      <- t.next_premium_sample + Time_ns.Span.to_int_ns t.premium_funding.sample_interval)
     else (
       t.time <- t.next_funding;
       apply_funding t;

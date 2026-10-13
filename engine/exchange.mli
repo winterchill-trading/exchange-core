@@ -17,8 +17,6 @@ module Config : sig
     ; min_order_value : Usd.t (** reduce-only orders are exempt *)
     ; market_slippage_bps : int (** default for market orders *)
     ; l2_levels : int (** default depth of [l2] *)
-    ; premium_funding : Premium_funding.Config.t
-    (** the funding formula of instruments with an oracle price ({!set_oracle}) *)
     }
   [@@deriving sexp_of]
 
@@ -27,7 +25,7 @@ module Config : sig
   val default_instruments : Instrument.t list
 
   (** [default_instruments], 20x, hourly funding at 0.00125%, $10 minimum, 5% market
-      slippage, 20 levels, {!Premium_funding.Config.default}. *)
+      slippage, 20 levels. *)
   val default : t
 end
 
@@ -35,8 +33,16 @@ type t
 
 (** [self_trade] is the self-trade prevention policy of every book (default
     [Order_book.Stp.default], [Cancel_taker]). It is not part of [Config.t], so journals
-    record it separately (see {!Journal}). *)
-val create : ?config:Config.t -> ?self_trade:Order_book.Stp.t -> unit -> t
+    record it separately (see {!Journal}). [premium_funding] (default
+    {!Premium_funding.Config.default}, Hyperliquid's values) is the funding formula of
+    instruments with an oracle price ({!set_oracle}); it is kept out of [Config.t] so that
+    front ends building a [Config.t] field by field are unaffected. *)
+val create
+  :  ?config:Config.t
+  -> ?self_trade:Order_book.Stp.t
+  -> ?premium_funding:Premium_funding.Config.t
+  -> unit
+  -> t
 
 val config : t -> Config.t
 val self_trade : t -> Order_book.Stp.t
@@ -185,8 +191,8 @@ val set_mark : t -> Symbol.t -> Price.t -> unit
 
     From the first oracle on, the symbol's funding follows {!Premium_funding}: [step]
     samples the premium of the book's impact prices over the oracle every
-    [Config.premium_funding.sample_interval] (at multiples of it), the rate charged at a
-    funding boundary comes from the average of the interval's samples, and payments are
+    [premium_funding.sample_interval] (at multiples of it), the rate charged at a funding
+    boundary comes from the average of the interval's samples, and payments are
     [size * oracle * rate]. A [set_funding_rate] still overrides the formula. Unknown
     symbols are ignored. *)
 val set_oracle : t -> Symbol.t -> Price.t -> unit
