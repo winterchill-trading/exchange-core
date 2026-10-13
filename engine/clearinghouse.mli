@@ -122,6 +122,22 @@ end
     its positions at mark. Returns one entry per closed position. *)
 val mark_to_market : t -> mark:mark -> Liquidation.t list
 
+(** The accounts whose equity is below their maintenance margin, in account order, without
+    liquidating them (for a front end that liquidates through the book). Like
+    [mark_to_market], forgets accounts that have gone flat. *)
+val below_maintenance : t -> mark:mark -> Account.t list
+
+(** Backstop liquidation: moves every position of [from] to [to_] at mark (realising
+    [from]'s PnL, [to_] taking the same positions at mark), then the whole remaining
+    balance of [from], so [from] is left flat with nothing. Returns one entry per position
+    moved, as [mark_to_market] does for closed ones. *)
+val transfer_positions
+  :  t
+  -> from:Account.t
+  -> to_:Account.t
+  -> mark:mark
+  -> Liquidation.t list
+
 module Funding_payment : sig
   type t =
     { account : Account.t

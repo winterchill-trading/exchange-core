@@ -345,6 +345,43 @@ let mark_to_market t ~mark =
   !liquidations
 ;;
 
+let below_maintenance t ~mark =
+  t.mark_pass <- t.mark_pass + 1;
+  let below = ref [] in
+  let flat = ref [] in
+  Map.fold_right t.with_positions ~init:() ~f:(fun ~key:account ~data:state () ->
+    if not (Account_state.has_open_position state)
+    then flat := account :: !flat
+    else if Usd.is_negative (maintenance_excess t state ~mark)
+    then below := account :: !below);
+  List.iter !flat ~f:(fun account ->
+    t.with_positions <- Map.remove t.with_positions account);
+  !below
+;;
+
+let transfer_positions t ~from ~to_ ~mark =
+  let state = account t from in
+  let liquidator = account t to_ in
+  let liquidations =
+    List.map (Account_state.open_positions state) ~f:(fun p ->
+      let px = mark_of ~mark p in
+      let size = p.size in
+      let pnl = Position.close_at p ~px in
+      Account_state.add_balance state pnl;
+      let taken = Account_state.position_or_create liquidator p.symbol in
+      let side : Side.t = if Size.is_positive size then Buy else Sell in
+      let change = Position.apply_trade taken ~side ~px ~sz:(Size.abs size) in
+      Account_state.add_balance liquidator change.closed_pnl;
+      note_position t liquidator taken;
+      { Liquidation.account = from; symbol = p.symbol; size; px; pnl })
+  in
+  (* The margin goes with the positions: the account is left with nothing. *)
+  let rest = state.balance in
+  Account_state.add_balance state (Usd.neg rest);
+  Account_state.add_balance liquidator rest;
+  liquidations
+;;
+
 module Funding_payment = struct
   type t =
     { account : Account.t
