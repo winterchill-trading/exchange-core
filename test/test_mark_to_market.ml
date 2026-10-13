@@ -126,6 +126,38 @@ let state ch =
       , (Account_state.open_positions a : Position.t list)])
 ;;
 
+(* [check_order_margin] against equity, margin used and order margin computed apart. *)
+let check_margin ch =
+  let mark symbol = Some (Price.of_int (if Symbol.equal symbol btc then 90 else 110)) in
+  for n = 1 to n_accounts + 1 do
+    let account = acct n in
+    List.iter [ Side.Buy; Sell ] ~f:(fun side ->
+      let px = Price.of_int 100 in
+      let sz = Size.of_int 1 in
+      let reserved = Usd.of_int 5 in
+      let required = Clearinghouse.order_margin ch account ~symbol:btc ~side ~px ~sz in
+      let available =
+        Usd.( - )
+          (Usd.( - )
+             (Clearinghouse.equity ch account ~mark)
+             (Clearinghouse.margin_used ch account ~mark))
+          reserved
+      in
+      [%test_result: bool]
+        (Result.is_ok
+           (Clearinghouse.check_order_margin
+              ch
+              account
+              ~symbol:btc
+              ~side
+              ~px
+              ~sz
+              ~reserved
+              ~mark))
+        ~expect:(Usd.( <= ) required available))
+  done
+;;
+
 let run ops =
   let engine = Clearinghouse.create instruments in
   let reference = Clearinghouse.create instruments in
@@ -163,6 +195,7 @@ let run ops =
        [%test_result: Clearinghouse.Funding_payment.t list]
          (Clearinghouse.apply_funding reference ~symbol ~rate ~mark)
          ~expect:payments);
+    check_margin engine;
     [%test_result: Sexp.t list] (state engine) ~expect:(state reference))
 ;;
 
