@@ -63,6 +63,7 @@ end
 
 type t =
   { config : Config.t
+  ; self_trade : Order_book.Stp.t
   ; clearinghouse : Clearinghouse.t
   ; books : Order_book.t Symbol.Table.t
   ; marks : Price.t Symbol.Table.t (** explicit marks from [set_mark] *)
@@ -81,7 +82,7 @@ type t =
   ; mutable next_funding : int
   }
 
-let create ?(config = Config.default) () =
+let create ?(config = Config.default) ?(self_trade = Order_book.Stp.default) () =
   let books = Symbol.Table.create () in
   let trade_ids = ref 1 in
   let next_tid () =
@@ -90,8 +91,9 @@ let create ?(config = Config.default) () =
     Trade_id.of_int tid
   in
   List.iter config.instruments ~f:(fun i ->
-    Hashtbl.set books ~key:i.symbol ~data:(Order_book.create i.symbol));
+    Hashtbl.set books ~key:i.symbol ~data:(Order_book.create ~stp:self_trade i.symbol));
   { config
+  ; self_trade
   ; clearinghouse =
       Clearinghouse.create ~default_leverage:config.default_leverage config.instruments
   ; books
@@ -113,6 +115,7 @@ let create ?(config = Config.default) () =
 ;;
 
 let config t = t.config
+let self_trade t = t.self_trade
 let instruments t = t.config.instruments
 let instrument t symbol = Instrument.find t.config.instruments symbol
 let clearinghouse t = t.clearinghouse
@@ -329,6 +332,20 @@ let record_fill t book (fill : Order_book.Fill.t) =
            })))
 ;;
 
+(* An own resting order removed by self-trade prevention: already off the book, so only
+   the indexes and reserved margin are left to clear. *)
+let expire_maker t ~symbol (o : Order_book.Resting_order.t) =
+  unindex t ~owner:o.owner ~symbol ~oid:o.oid ~cloid:o.cloid;
+  emit
+    t
+    (Order_cancelled
+       { account = o.owner
+       ; order = open_order_of_resting ~symbol o
+       ; reason = Self_trade
+       ; time = t.time
+       })
+;;
+
 let avg_px (fills : Order_book.Fill.t list) ~filled =
   let notional = Usd.sum (List.map fills ~f:(fun f -> Notional.mul f.px f.sz)) in
   Notional.div notional filled
@@ -365,6 +382,9 @@ let submit
   let book = Option.value_exn (book t symbol) in
   let r = submit ~oid:order_id ~next_tid:t.next_tid in
   List.iter r.fills ~f:(record_fill t book);
+  (* Before the taker's own events, so a consumer rebuilding the book from events never
+     sees the taker rest across its expired order. *)
+  List.iter r.expired_makers ~f:(expire_maker t ~symbol);
   let order ~size : Open_order.t =
     { symbol
     ; side

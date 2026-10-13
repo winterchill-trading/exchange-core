@@ -10,7 +10,9 @@ module Cancel_reason : sig
     | User (** cancel request *)
     | Modified (** replaced by a modify request *)
     | Ioc_unfilled (** IOC or market remainder *)
-    | Self_trade (** taker remainder cancelled by self-trade prevention *)
+    | Self_trade
+    (** removed by self-trade prevention: a taker's remainder, or an own resting order
+        expired by the taker ([Expire_maker], [Cancel_both]) *)
     | Liquidated (** the account was liquidated *)
   [@@deriving sexp_of, compare, equal]
 end

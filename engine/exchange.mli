@@ -31,8 +31,13 @@ end
 
 type t
 
-val create : ?config:Config.t -> unit -> t
+(** [self_trade] is the self-trade prevention policy of every book (default
+    [Order_book.Stp.default], [Cancel_taker]). It is not part of [Config.t], so journals
+    record it separately (see {!Journal}). *)
+val create : ?config:Config.t -> ?self_trade:Order_book.Stp.t -> unit -> t
+
 val config : t -> Config.t
+val self_trade : t -> Order_book.Stp.t
 val instruments : t -> Instrument.t list
 val instrument : t -> Symbol.t -> Instrument.t option
 val clearinghouse : t -> Clearinghouse.t
@@ -54,7 +59,16 @@ val set_leverage : t -> Account.t -> Symbol.t -> int -> unit Or_error.t
 
     Every call takes a fresh order id before any check, so a rejected order (including an
     IOC or market order that fills nothing) has an id too; it is carried by the
-    [Order_rejected] event and returned by {!place_with_order_id}. *)
+    [Order_rejected] event and returned by {!place_with_order_id}.
+
+    Self-trade prevention follows the exchange's policy. Under [Cancel_taker] and
+    [Cancel_both] a taker that reaches its own resting order before filling anything is
+    rejected with [Self_trade], and with partial fills it is [Filled] with its remainder
+    cancelled. Under [Expire_maker] the taker is never rejected for self-trade: it keeps
+    matching behind its own order and fills, rests or is IOC-cancelled as usual. Under
+    [Expire_maker] and [Cancel_both] each own order removed from the book gets an
+    [Order_cancelled] event with reason [Self_trade], before the taker's own events, and
+    its reserved margin is released. *)
 val place : t -> Account.t -> Order_request.t -> Order_status.t
 
 (** [place], also returning the order id assigned to the request whatever the outcome (for
