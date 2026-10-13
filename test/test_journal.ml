@@ -200,18 +200,20 @@ let%expect_test "default headers keep the original format" =
              (Journal.to_string ~header:{ self_trade = Expire_maker } inputs)
            : (Journal.Header.t * Input.t list) Or_error.t)
         ~bad_header:
-          (Journal.of_string_with_header (Journal.magic_with_header ^ "\255")
-           : (Journal.Header.t * Input.t list) Or_error.t)];
+          ((* Only the message: bin_prot's exception names the source path, which depends
+              on the dune workspace root. *)
+           (match Journal.of_string_with_header (Journal.magic_with_header ^ "\255") with
+            | Ok _ -> "ok"
+            | Error e ->
+              (match Error.sexp_of_t e with
+               | List (Atom msg :: _) -> msg
+               | sexp -> Sexp.to_string sexp))
+           : string)];
   [%expect
     {|
     ((same_bytes true) (magic EXJRNL01)
      (expire_maker (Ok (((self_trade Expire_maker)) ((Step (now 1))))))
-     (bad_header
-      (Error
-       ("Journal: unreadable header"
-        (exn
-         (src/common.ml.Read_error
-          "Sum_tag / exchange-core/engine/journal.ml.Header.Wire.stp" 9))))))
+     (bad_header "Journal: unreadable header"))
     |}];
   let path = "test_journal_mismatch.bin" in
   let journal = Journal.create ~header:{ self_trade = Cancel_both } path in
