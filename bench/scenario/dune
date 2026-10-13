@@ -1,0 +1,5 @@
+(library
+ (name exchange_core_bench_scenario)
+ (libraries core exchange-core exchange-core-engine)
+ (preprocess
+  (pps ppx_jane)))
