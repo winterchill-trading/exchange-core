@@ -76,6 +76,9 @@ end
 type t =
   { config : Config.t
   ; premium_funding : Premium_funding.Config.t
+  ; book_liquidation : Book_liquidation.Config.t option
+  ; liquidation_events : Book_liquidation.Event.t Queue.t
+  ; partial_until : int Account.Table.t (** end of each account's partial cooldown *)
   ; self_trade : Order_book.Stp.t
   ; clearinghouse : Clearinghouse.t
   ; books : Order_book.t Symbol.Table.t
@@ -105,6 +108,7 @@ let create
   ?(config = Config.default)
   ?(self_trade = Order_book.Stp.default)
   ?(premium_funding = Premium_funding.Config.default)
+  ?book_liquidation
   ()
   =
   let books = Symbol.Table.create () in
@@ -118,6 +122,9 @@ let create
     Hashtbl.set books ~key:i.symbol ~data:(Order_book.create ~stp:self_trade i.symbol));
   { config
   ; premium_funding
+  ; book_liquidation
+  ; liquidation_events = Queue.create ()
+  ; partial_until = Account.Table.create ()
   ; self_trade
   ; clearinghouse =
       Clearinghouse.create ~default_leverage:config.default_leverage config.instruments
@@ -146,6 +153,7 @@ let create
 ;;
 
 let config t = t.config
+let book_liquidation t = t.book_liquidation
 let self_trade t = t.self_trade
 let instruments t = t.config.instruments
 let instrument t symbol = Instrument.find t.config.instruments symbol
@@ -891,19 +899,167 @@ let account_view t account =
 
 (* Marks, liquidation and funding *)
 
-let liquidate t =
+let cancel_all_for_liquidation t account =
+  List.iter (resting_orders_of t account) ~f:(fun (symbol, o) ->
+    ignore (remove_resting t ~symbol o.oid ~reason:Liquidated : bool));
+  if not (Hashtbl.is_empty t.triggers)
+  then
+    List.rev (trigger_orders t account)
+    |> List.iter ~f:(cancel_trigger t ~reason:Liquidated)
+;;
+
+let liquidate_at_mark t =
   let liquidations = Clearinghouse.mark_to_market t.clearinghouse ~mark:(mark_fn t) in
   List.iter liquidations ~f:(fun liquidation ->
     emit t (Liquidation { liquidation; time = t.time }));
   List.map liquidations ~f:(fun l -> l.account)
   |> List.dedup_and_sort ~compare:Account.compare
-  |> List.iter ~f:(fun account ->
-    List.iter (resting_orders_of t account) ~f:(fun (symbol, o) ->
-      ignore (remove_resting t ~symbol o.oid ~reason:Liquidated : bool));
-    if not (Hashtbl.is_empty t.triggers)
+  |> List.iter ~f:(fun account -> cancel_all_for_liquidation t account)
+;;
+
+(* A reduce-only market order for a liquidation. It only reduces the position of an
+   account that is short of margin, so unlike [place_market] it is not margin-checked. *)
+let place_liquidation_order t account ~symbol ~side ~size ~order_id =
+  let book = Option.value_exn (book t symbol) in
+  let slippage_bps = t.config.market_slippage_bps in
+  let size =
+    Size.min size (Clearinghouse.reduce_only_size t.clearinghouse account ~symbol ~side)
+  in
+  match Order_book.market_limit_px book ~side ~slippage_bps with
+  | None -> emit_reject t account ~symbol ~order_id No_liquidity
+  | Some limit_px ->
+    submit
+      t
+      account
+      ~symbol
+      ~side
+      ~limit_px
+      ~order_id
+      ~client_order_id:None
+      ~submit:(fun ~oid ~next_tid ->
+        Order_book.market
+          book
+          ~oid
+          ~owner:account
+          ~side
+          ~sz:size
+          ~slippage_bps
+          ~reduce_only:true
+          ~time:t.time
+          ~next_tid
+          ())
+;;
+
+let emit_liquidation t (event : Book_liquidation.Event.t) =
+  Queue.enqueue t.liquidation_events { event with before_seq = t.next_seq }
+;;
+
+(* [fraction] of [size] (positive), rounded down to the lot, at least one lot. *)
+let slice (instrument : Instrument.t) size ~fraction =
+  let lot = Size.to_units (Instrument.lot_size instrument) in
+  let units = Float.iround_down_exn (Float.of_int (Size.to_units size) *. fraction) in
+  Size.of_units (Int.max lot (units - (units % lot)))
+;;
+
+let liquidate_account_through_book t (c : Book_liquidation.Config.t) account =
+  cancel_all_for_liquidation t account;
+  let ch = t.clearinghouse in
+  let mark = mark_fn t in
+  let equity = Clearinghouse.equity ch account ~mark in
+  let maintenance = Clearinghouse.maintenance_margin ch account ~mark in
+  let positions =
+    Option.value_map (Clearinghouse.find_account ch account) ~default:[] ~f:(fun a ->
+      Account_state.open_positions a)
+  in
+  let px_of (p : Position.t) = Option.value (mark p.symbol) ~default:p.entry_px in
+  let notional =
+    Usd.sum
+      (List.map positions ~f:(fun p -> Usd.abs (Position.notional p ~mark:(px_of p))))
+  in
+  let event (p : Position.t) method_ ~order_id ~order_size : Book_liquidation.Event.t =
+    { account
+    ; symbol = p.symbol
+    ; method_
+    ; order_id
+    ; size = p.size
+    ; order_size
+    ; mark = px_of p
+    ; equity
+    ; notional
+    ; time = t.time
+    ; before_seq = t.next_seq
+    }
+  in
+  if Usd.( >= ) equity maintenance
+  then ()
+  else if Float.( < )
+            (Usd.to_float equity)
+            (c.backstop_fraction *. Usd.to_float maintenance)
+  then (
+    List.iter positions ~f:(fun p ->
+      emit_liquidation t (event p Backstop ~order_id:None ~order_size:(Size.abs p.size)));
+    Clearinghouse.transfer_positions ch ~from:account ~to_:c.liquidator ~mark
+    |> List.iter ~f:(fun liquidation ->
+      emit t (Liquidation { liquidation; time = t.time })))
+  else (
+    let cooling =
+      match Hashtbl.find t.partial_until account with
+      | Some until -> t.time < until
+      | None -> false
+    in
+    let partial = ref false in
+    (* Sizes are read before any order goes out. *)
+    List.map positions ~f:(fun p -> p, p.size)
+    |> List.iter ~f:(fun ((p : Position.t), size) ->
+      let size_abs = Size.abs size in
+      let order_size =
+        match instrument t p.symbol with
+        | Some i
+          when (not cooling)
+               && Usd.( > )
+                    (Usd.abs (Position.notional p ~mark:(px_of p)))
+                    c.partial_above ->
+          partial := true;
+          slice i size_abs ~fraction:c.partial_fraction
+        | Some _ | None -> size_abs
+      in
+      let order_id = next_order_id t in
+      emit_liquidation
+        t
+        { (event p Market ~order_id:(Some order_id) ~order_size) with size };
+      let side : Side.t = if Size.is_positive size then Sell else Buy in
+      ignore
+        (place_liquidation_order
+           t
+           account
+           ~symbol:p.symbol
+           ~side
+           ~size:order_size
+           ~order_id
+         : Order_status.t));
+    if !partial
     then
-      List.rev (trigger_orders t account)
-      |> List.iter ~f:(cancel_trigger t ~reason:Liquidated))
+      Hashtbl.set
+        t.partial_until
+        ~key:account
+        ~data:(t.time + Time_ns.Span.to_int_ns c.cooldown))
+;;
+
+let liquidate t =
+  match t.book_liquidation with
+  | None -> liquidate_at_mark t
+  | Some c ->
+    Clearinghouse.below_maintenance t.clearinghouse ~mark:(mark_fn t)
+    |> List.iter ~f:(fun account ->
+      (* The liquidator is never liquidated. *)
+      if not (Account.equal account c.liquidator)
+      then liquidate_account_through_book t c account)
+;;
+
+let drain_liquidation_events t =
+  let events = Queue.to_list t.liquidation_events in
+  Queue.clear t.liquidation_events;
+  events
 ;;
 
 let set_mark t symbol px =

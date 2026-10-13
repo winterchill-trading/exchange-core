@@ -36,14 +36,18 @@ type t
     record it separately (see {!Journal}). [premium_funding] (default
     {!Premium_funding.Config.default}, Hyperliquid's values) is the funding formula of
     instruments with an oracle price ({!set_oracle}); it is kept out of [Config.t] so that
-    front ends building a [Config.t] field by field are unaffected. *)
+    front ends building a [Config.t] field by field are unaffected. [book_liquidation]
+    liquidates through the order book ({!Book_liquidation}) instead of closing positions
+    at the mark; journals record it in their header. *)
 val create
   :  ?config:Config.t
   -> ?self_trade:Order_book.Stp.t
   -> ?premium_funding:Premium_funding.Config.t
+  -> ?book_liquidation:Book_liquidation.Config.t
   -> unit
   -> t
 
+val book_liquidation : t -> Book_liquidation.Config.t option
 val config : t -> Config.t
 val self_trade : t -> Order_book.Stp.t
 val instruments : t -> Instrument.t list
@@ -155,6 +159,10 @@ val trigger_orders : t -> Account.t -> Trigger_order.t list
 (** Returns the trigger events since the previous call, oldest first, and forgets them. *)
 val drain_trigger_events : t -> Trigger_event.t list
 
+(** Returns the liquidation steps since the previous call (with [book_liquidation]),
+    oldest first, and forgets them. Backstop takeovers also produce [Liquidation] events. *)
+val drain_liquidation_events : t -> Book_liquidation.Event.t list
+
 (** {2 Views} *)
 
 val l2 : ?n_levels:int -> t -> Symbol.t -> L2.t option
@@ -180,7 +188,8 @@ val account_view : t -> Account.t -> Account_view.t
     trade price, else the book mid. *)
 val mark : t -> Symbol.t -> Price.t option
 
-(** Sets the mark price and liquidates accounts that fall below maintenance margin. *)
+(** Sets the mark price and liquidates accounts that fall below maintenance margin (at the
+    mark, or through the book with [book_liquidation]). *)
 val set_mark : t -> Symbol.t -> Price.t -> unit
 
 (** Publishes an external (oracle) price for the symbol, as Hyperliquid's validators do
