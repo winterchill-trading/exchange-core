@@ -328,3 +328,25 @@ let%test_unit "random fills conserve value (balances + unrealised PnL + fees)" =
       in
       [%test_result: Size.t] net ~expect:Size.zero)
 ;;
+
+let%expect_test "a liquidation price beyond the price range is reported as none" =
+  let ch = Clearinghouse.create meta_no_fees in
+  Clearinghouse.deposit ch (acct 1) (usd "10000000");
+  Clearinghouse.deposit ch (acct 2) (usd "10000000");
+  (* Account 1 sells 0.00001 BTC with $10M behind it: the estimate is about 1e12. *)
+  ignore
+    (Clearinghouse.settle_fill ch (fill ~taker:1 ~maker:2 ~side:Sell "100000" "0.00001")
+     : Clearinghouse.Settlement.t * Clearinghouse.Settlement.t);
+  let mark _ = Some (px "100000") in
+  List.iter [ 1; 2 ] ~f:(fun n ->
+    let view = Clearinghouse.view ch (acct n) ~mark ~time:0 in
+    List.iter view.positions ~f:(fun p ->
+      print_s
+        [%message
+          "" ~size:(p.size : Size.t) ~liquidation_px:(p.liquidation_px : Price.t option)]));
+  [%expect
+    {|
+    ((size -0.00001) (liquidation_px ()))
+    ((size 0.00001) (liquidation_px ()))
+    |}]
+;;
