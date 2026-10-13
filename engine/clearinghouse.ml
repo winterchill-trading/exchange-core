@@ -13,6 +13,8 @@ module Market = struct
     { instrument : Instrument.t
     ; taker_rate : Rate.t
     ; maker_rate : Rate.t
+    ; mutable mark_pass : int (** the [mark_to_market] pass [mark] was read in *)
+    ; mutable mark : Price.t option
     }
   [@@deriving sexp_of]
 
@@ -20,6 +22,8 @@ module Market = struct
     { instrument
     ; taker_rate = rate_of_bps instrument.fees.taker_bps
     ; maker_rate = rate_of_bps instrument.fees.maker_bps
+    ; mark_pass = 0
+    ; mark = None
     }
   ;;
 end
@@ -34,6 +38,7 @@ type t =
   ; mutable with_positions : Account_state.t Account.Map.t [@sexp.opaque]
   (** accounts with at least one open position; marking and funding visit only these *)
   ; mutable fees_collected : Usd.t
+  ; mutable mark_pass : int (** count of [mark_to_market] calls *)
   }
 [@@deriving sexp_of]
 
@@ -48,6 +53,7 @@ let create ?(default_leverage = 20) instruments =
   ; sorted_accounts = Account.Map.empty
   ; with_positions = Account.Map.empty
   ; fees_collected = Usd.zero
+  ; mark_pass = 0
   }
 ;;
 
@@ -55,9 +61,8 @@ let instruments t = t.instruments
 let fees_collected t = t.fees_collected
 
 let market t symbol =
-  match Hashtbl.find t.markets symbol with
-  | Some m -> m
-  | None -> raise_s [%message "Clearinghouse: unknown symbol" (symbol : Symbol.t)]
+  Hashtbl.find_and_call t.markets symbol ~if_found:Fn.id ~if_not_found:(fun symbol ->
+    raise_s [%message "Clearinghouse: unknown symbol" (symbol : Symbol.t)])
 ;;
 
 let instrument t symbol = (market t symbol).instrument
@@ -77,10 +82,6 @@ let account t account =
 
 let find_account t account = Hashtbl.find t.accounts account
 let accounts t = Map.data t.sorted_accounts
-
-let has_open_position (state : Account_state.t) =
-  Hashtbl.exists state.positions ~f:(fun p -> not (Position.is_flat p))
-;;
 
 (* Adds [state] to [with_positions] once its position [p] is open. An account that goes
    flat stays until the next [mark_to_market] prunes it, so a position opened and closed
@@ -238,33 +239,68 @@ module Liquidation = struct
   [@@deriving sexp_of, compare, equal]
 end
 
-let liquidate_account (state : Account_state.t) ~mark =
+(* [mark] read once per symbol per [mark_to_market] pass. *)
+let pass_mark t ~mark (p : Position.t) =
+  let m = market t p.symbol in
+  if m.mark_pass <> t.mark_pass
+  then (
+    m.mark <- mark p.symbol;
+    m.mark_pass <- t.mark_pass);
+  match m.mark with
+  | Some px -> px
+  | None -> p.entry_px
+;;
+
+let liquidate_account t (state : Account_state.t) ~mark =
   let account = state.account in
   List.map (Account_state.open_positions state) ~f:(fun p ->
-    let px = mark_of ~mark p in
+    let px = pass_mark t ~mark p in
     let size = p.size in
     let pnl = Position.close_at p ~px in
     Account_state.add_balance state pnl;
     { Liquidation.account; symbol = p.symbol; size; px; pnl })
 ;;
 
+(* [equity - maintenance margin] in one pass over the positions, without building the
+   sorted position lists [equity] and [maintenance_margin] use. Sums of fixed-point values
+   are exact, so the sign matches comparing the two separately. *)
+let rec maintenance_excess_loop t ~mark acc = function
+  | [] -> acc
+  | (p : Position.t) :: rest ->
+    let acc =
+      if Position.is_flat p
+      then acc
+      else (
+        let px = pass_mark t ~mark p in
+        Usd.( - )
+          (Usd.( + ) acc (Position.unrealized_pnl p ~mark:px))
+          (Usd.div_int
+             (Usd.abs (Position.notional p ~mark:px))
+             (2 * (market t p.symbol).instrument.max_leverage)))
+    in
+    maintenance_excess_loop t ~mark acc rest
+;;
+
+let maintenance_excess t (state : Account_state.t) ~mark =
+  maintenance_excess_loop t ~mark state.balance state.position_list
+;;
+
 let mark_to_market t ~mark =
   (* Accounts are visited from the highest id down so the result, built by prepending, is
      in account order. *)
-  let liquidations, flat =
-    Map.fold_right
-      t.with_positions
-      ~init:([], [])
-      ~f:(fun ~key:account ~data:state ((liquidations, flat) as acc) ->
-        if not (has_open_position state)
-        then liquidations, account :: flat
-        else if Usd.( >= ) (equity t account ~mark) (maintenance_margin t account ~mark)
-        then acc
-        else liquidate_account state ~mark @ liquidations, account :: flat)
-  in
-  List.iter flat ~f:(fun account ->
+  t.mark_pass <- t.mark_pass + 1;
+  let liquidations = ref [] in
+  let flat = ref [] in
+  Map.fold_right t.with_positions ~init:() ~f:(fun ~key:account ~data:state () ->
+    if not (Account_state.has_open_position state)
+    then flat := account :: !flat
+    else if Usd.is_negative (maintenance_excess t state ~mark)
+    then (
+      liquidations := liquidate_account t state ~mark @ !liquidations;
+      flat := account :: !flat));
+  List.iter !flat ~f:(fun account ->
     t.with_positions <- Map.remove t.with_positions account);
-  liquidations
+  !liquidations
 ;;
 
 module Funding_payment = struct
