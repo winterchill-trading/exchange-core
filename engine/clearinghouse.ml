@@ -6,7 +6,7 @@ module Notional = Fixed_decimal.Product (Price) (Size) (Usd)
 module Rate = Fixed_decimal.Make ()
 module Fee = Fixed_decimal.Product (Usd) (Rate) (Usd)
 
-let rate_of_bps bps = Rate.of_float (bps /. 10_000.)
+let rate_of_bps bps = (Rate.of_float [@alert "-lossy"]) (bps /. 10_000.)
 
 module Market = struct
   type t =
@@ -356,7 +356,7 @@ module Funding_payment = struct
 end
 
 let apply_funding t ~symbol ~rate ~mark =
-  let rate = Rate.of_float rate in
+  let rate = (Rate.of_float [@alert "-lossy"]) rate in
   (* [with_positions] may still hold accounts that went flat since the last
      [mark_to_market]; they have no position in [symbol] and are skipped. *)
   List.filter_map (Map.data t.with_positions) ~f:(fun state ->
@@ -377,7 +377,7 @@ let liquidation_px t ~mark ~equity ~maintenance (p : Position.t) =
   let l = 1. /. Float.of_int (2 * max_leverage t p.symbol) in
   let margin_available = Usd.to_float equity -. Usd.to_float maintenance in
   let liq = mark_px -. (side *. margin_available /. size /. (1. -. (l *. side))) in
-  if Float.( > ) liq 0. then Some (Price.of_float liq) else None
+  if Float.( > ) liq 0. then Some ((Price.of_float [@alert "-lossy"]) liq) else None
 ;;
 
 let view t account ~mark ~time : Account_view.t =
