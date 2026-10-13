@@ -66,7 +66,8 @@ caches the built opam switch between runs.
 | `L2` | Aggregated book snapshot, best first |
 | `Position_view`, `Account_view` | Positions and cross-margin summary at mark: balance, equity, margin used, maintenance, available |
 | `Fee_schedule` | Maker/taker fees in basis points |
-| `Instrument` | Symbol, size decimals, price tick, optional significant-figure limit, max leverage, fees; validation and rounding |
+| `Instrument` | Symbol, size decimals, price tick, optional significant-figure limit, max leverage, fees, optional margin tiers; validation and rounding |
+| `Margin_tier` | Notional tiers of maximum leverage and the continuous tiered maintenance margin |
 
 None of these carry JSON codecs: encodings are venue-specific and live in the venue's
 protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs).
@@ -218,7 +219,10 @@ keep their format and an anchored run replays bit for bit.
   PnL at mark. A new order needs `notional / leverage` for the part that increases the
   position, out of equity minus position margin minus margin held by resting orders
   (resting orders reserve their full notional / leverage). Maintenance margin is
-  `notional / (2 * max_leverage)`. Default leverage is `min 20 max_leverage`.
+  `notional / (2 * max_leverage)`, or with margin tiers
+  `notional * rate(tier) - deduction(tier)`, each tier's rate half the initial margin at
+  its leverage and the deductions keeping it continuous; `set_leverage` then refuses a
+  leverage above the tier of the current position. Default leverage is `min 20 max_leverage`.
 - **Fees** come from each instrument's `Fee_schedule` (default taker 3.5 bps, maker
   1 bp) and are always charged.
 - **Mark price** is the last `set_mark`, else the last trade price, else the book mid.
