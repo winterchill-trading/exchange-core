@@ -15,20 +15,31 @@ let words_per_run f =
   Float.iround_nearest_exn (Float.of_int (Gc.minor_words () - before) /. Float.of_int runs)
 ;;
 
+(* The submit paths compile to slightly different allocation on amd64 (CI) and arm64, so
+   each case lists the words measured on both; a mismatch prints the new number. *)
 let%expect_test "minor words per call" =
   let ex = Scenario.create () in
   List.iter
-    [ "step", Scenario.step ex
-    ; "submit IOC buy+sell", Scenario.match_round_trip ex
-    ; "submit+cancel", Scenario.place_and_cancel ex
-    ; "maker submit+cancel", Scenario.maker_place_and_cancel ex
+    [ "step", Scenario.step ex, [ 17 ]
+    ; "submit IOC buy+sell", Scenario.match_round_trip ex, [ 442; 456 ]
+    ; "submit+cancel", Scenario.place_and_cancel ex, [ 325; 333 ]
+    ; "maker submit+cancel", Scenario.maker_place_and_cancel ex, [ 926; 934 ]
     ]
-    ~f:(fun (name, f) -> printf "%-20s %d\n" name (words_per_run f));
+    ~f:(fun (name, f, pinned) ->
+      let words = words_per_run f in
+      if List.mem pinned words ~equal:Int.equal
+      then printf "%-20s pinned\n" name
+      else
+        printf
+          "%-20s %d (pinned %s)\n"
+          name
+          words
+          (Sexp.to_string [%sexp (pinned : int list)]));
   [%expect
     {|
-    step                 17
-    submit IOC buy+sell  456
-    submit+cancel        333
-    maker submit+cancel  934
+    step                 pinned
+    submit IOC buy+sell  pinned
+    submit+cancel        pinned
+    maker submit+cancel  pinned
     |}]
 ;;
