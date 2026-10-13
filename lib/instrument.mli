@@ -9,20 +9,31 @@ type t =
   ; price_tick : Price.t (** prices must be multiples of this *)
   ; max_significant_figures : int option
   (** if set, non-integer prices have at most this many significant figures *)
-  ; max_leverage : int
+  ; max_leverage : int (** of the first margin tier *)
   ; fees : Fee_schedule.t
+  ; margin_tiers : Margin_tier.t list
+  (** empty for a single tier at [max_leverage]; omitted from the sexp when empty *)
   }
 [@@deriving sexp, compare, equal]
 
-(** Defaults: no significant figure limit, {!Fee_schedule.default}. *)
+(** Defaults: no significant figure limit, {!Fee_schedule.default}, a single margin tier.
+    Raises if [margin_tiers] is not valid ({!Margin_tier.validate}) or its first tier's
+    leverage is not [max_leverage]. *)
 val create
   :  ?max_significant_figures:int
   -> ?fees:Fee_schedule.t
+  -> ?margin_tiers:Margin_tier.t list
   -> Symbol.t
   -> size_decimals:int
   -> price_tick:Price.t
   -> max_leverage:int
   -> t
+
+(** The margin tiers, a single one at [max_leverage] when none were given. *)
+val margin_tiers : t -> Margin_tier.t list
+
+(** The maximum leverage of a position with [notional] (absolute). *)
+val max_leverage_at : t -> notional:Usd.t -> int
 
 (** [10^-size_decimals]. *)
 val lot_size : t -> Size.t

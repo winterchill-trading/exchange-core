@@ -7,6 +7,7 @@ type t =
   ; max_significant_figures : int option
   ; max_leverage : int
   ; fees : Fee_schedule.t
+  ; margin_tiers : Margin_tier.t list [@sexp.list]
   }
 [@@deriving sexp, compare, equal]
 
@@ -20,12 +21,43 @@ let tick_of_decimals decimals =
 let create
   ?max_significant_figures
   ?(fees = Fee_schedule.default)
+  ?(margin_tiers = [])
   symbol
   ~size_decimals
   ~price_tick
   ~max_leverage
   =
-  { symbol; size_decimals; price_tick; max_significant_figures; max_leverage; fees }
+  if not (List.is_empty margin_tiers)
+  then (
+    Margin_tier.validate margin_tiers;
+    match margin_tiers with
+    | first :: _ when first.max_leverage <> max_leverage ->
+      raise_s
+        [%message
+          "Instrument.create: the first margin tier's leverage must be max_leverage"
+            (max_leverage : int)
+            (first : Margin_tier.t)]
+    | _ -> ());
+  { symbol
+  ; size_decimals
+  ; price_tick
+  ; max_significant_figures
+  ; max_leverage
+  ; fees
+  ; margin_tiers
+  }
+;;
+
+let margin_tiers t =
+  match t.margin_tiers with
+  | [] -> [ { Margin_tier.lower_bound = Usd.zero; max_leverage = t.max_leverage } ]
+  | tiers -> tiers
+;;
+
+let max_leverage_at t ~notional =
+  match t.margin_tiers with
+  | [] -> t.max_leverage
+  | tiers -> (Margin_tier.find tiers ~notional).max_leverage
 ;;
 
 let lot_size t = Size.of_units (Size.units_per_one / pow10 t.size_decimals)
