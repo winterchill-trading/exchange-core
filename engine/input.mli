@@ -69,6 +69,10 @@ type t =
       ; request : Order_request.t
       ; trigger : Trigger.t
       } (** a modify whose replacement is a trigger order *)
+  | Set_oracle of
+      { symbol : Symbol.t
+      ; px : Price.t
+      }
 [@@deriving sexp_of, compare, equal]
 
 include Binable.S with type t := t

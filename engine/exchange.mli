@@ -17,6 +17,8 @@ module Config : sig
     ; min_order_value : Usd.t (** reduce-only orders are exempt *)
     ; market_slippage_bps : int (** default for market orders *)
     ; l2_levels : int (** default depth of [l2] *)
+    ; premium_funding : Premium_funding.Config.t
+    (** the funding formula of instruments with an oracle price ({!set_oracle}) *)
     }
   [@@deriving sexp_of]
 
@@ -25,7 +27,7 @@ module Config : sig
   val default_instruments : Instrument.t list
 
   (** [default_instruments], 20x, hourly funding at 0.00125%, $10 minimum, 5% market
-      slippage, 20 levels. *)
+      slippage, 20 levels, {!Premium_funding.Config.default}. *)
   val default : t
 end
 
@@ -168,16 +170,43 @@ val account_view : t -> Account.t -> Account_view.t
 
 (** {2 Prices, funding and time} *)
 
-(** Mark price: the last [set_mark], else the last trade price, else the book mid. *)
+(** Mark price: the last [set_mark] or the mark derived by [set_oracle], else the last
+    trade price, else the book mid. *)
 val mark : t -> Symbol.t -> Price.t option
 
 (** Sets the mark price and liquidates accounts that fall below maintenance margin. *)
 val set_mark : t -> Symbol.t -> Price.t -> unit
 
+(** Publishes an external (oracle) price for the symbol, as Hyperliquid's validators do
+    every 3 seconds. The mark becomes the {!Price_index} median of the oracle plus the
+    moving average of the book's premium, the book's own prices and their moving average,
+    rounded to a valid price; then accounts are liquidated and trigger orders fire as
+    after [set_mark].
+
+    From the first oracle on, the symbol's funding follows {!Premium_funding}: [step]
+    samples the premium of the book's impact prices over the oracle every
+    [Config.premium_funding.sample_interval] (at multiples of it), the rate charged at a
+    funding boundary comes from the average of the interval's samples, and payments are
+    [size * oracle * rate]. A [set_funding_rate] still overrides the formula. Unknown
+    symbols are ignored. *)
+val set_oracle : t -> Symbol.t -> Price.t -> unit
+
+(** The last [set_oracle] price. *)
+val oracle : t -> Symbol.t -> Price.t option
+
+(** The latest premium sample of a symbol with an oracle price. *)
+val premium : t -> Symbol.t -> float option
+
+(** [(impact_bid, impact_ask)]: the average prices of selling and of buying the symbol's
+    impact notional ({!Premium_funding.Config.impact_notional}) against its book now. *)
+val impact_pxs : t -> Symbol.t -> float option * float option
+
 val set_funding_rate : t -> Symbol.t -> float -> unit
 
 (** The funding rate per interval charged at the next funding boundary: the last
-    [set_funding_rate] for the symbol, else [Config.default_funding_rate]. *)
+    [set_funding_rate] for the symbol, else for a symbol with an oracle price the
+    {!Premium_funding.rate} of the premium samples taken since the last boundary (the
+    interest rate alone before the first sample), else [Config.default_funding_rate]. *)
 val funding_rate : t -> Symbol.t -> float
 
 (** Advances the clock to [now] (raises if it would go backwards), charges funding for
@@ -188,9 +217,9 @@ val step : t -> now:int -> unit
 
     Every call above that changes the exchange ([deposit], [set_leverage], [place],
     [place_with_order_id], [reject], [cancel], [cancel_by_client_order_id], [modify],
-    [place_trigger], [set_mark], [set_funding_rate], [step]) is reported to the input
-    recorders as an {!Input.t} once it has been performed. Changes made directly through
-    {!clearinghouse} or {!book} are not. *)
+    [place_trigger], [set_mark], [set_oracle], [set_funding_rate], [step]) is reported to
+    the input recorders as an {!Input.t} once it has been performed. Changes made directly
+    through {!clearinghouse} or {!book} are not. *)
 
 (** Adds a recorder, called after every mutating call with the request it performed.
     Recorders are called in the order they were added. *)

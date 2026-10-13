@@ -57,6 +57,10 @@ type t =
       ; request : Order_request.t
       ; trigger : Trigger.t
       }
+  | Set_oracle of
+      { symbol : Symbol.t
+      ; px : Price.t
+      }
 [@@deriving sexp_of, compare, equal]
 
 (* The on-disk shape. Primitive types only, so the encoding is stable whatever the
@@ -133,6 +137,7 @@ module Wire = struct
     | Step of int
     | Place_trigger of string * request * trigger
     | Modify_trigger of string * target * request * trigger
+    | Set_oracle of string * int
   [@@deriving bin_io]
 end
 
@@ -280,6 +285,7 @@ let to_wire : t -> Wire.t =
   | Modify_trigger { account; target; request; trigger } ->
     Modify_trigger
       (a account, target_to_wire target, request_to_wire request, trigger_to_wire trigger)
+  | Set_oracle { symbol; px } -> Set_oracle (s symbol, Price.to_units px)
 ;;
 
 let of_wire : Wire.t -> t =
@@ -330,6 +336,7 @@ let of_wire : Wire.t -> t =
       ; request = request_of_wire request
       ; trigger = trigger_of_wire trigger
       }
+  | Set_oracle (symbol, px) -> Set_oracle { symbol = s symbol; px = Price.of_units px }
 ;;
 
 include

@@ -11,6 +11,7 @@ module Config = struct
     ; min_order_value : Usd.t
     ; market_slippage_bps : int
     ; l2_levels : int
+    ; premium_funding : Premium_funding.Config.t
     }
   [@@deriving sexp_of]
 
@@ -36,6 +37,7 @@ module Config = struct
     ; min_order_value = Usd.of_int 10
     ; market_slippage_bps = 500
     ; l2_levels = 20
+    ; premium_funding = Premium_funding.Config.default
     }
   ;;
 end
@@ -61,6 +63,18 @@ module Reserve = struct
   ;;
 end
 
+(* Premium samples of one symbol since its last funding payment. *)
+module Premiums = struct
+  type t =
+    { mutable sum : float
+    ; mutable count : int
+    ; mutable last : float option
+    }
+
+  let create () = { sum = 0.; count = 0; last = None }
+  let average t = if t.count = 0 then 0. else t.sum /. Float.of_int t.count
+end
+
 type t =
   { config : Config.t
   ; self_trade : Order_book.Stp.t
@@ -69,6 +83,10 @@ type t =
   ; marks : Price.t Symbol.Table.t (** explicit marks from [set_mark] *)
   ; last_trade : Price.t Symbol.Table.t
   ; funding_rates : float Symbol.Table.t
+  ; oracles : Price.t Symbol.Table.t (** last [set_oracle] *)
+  ; indices : Price_index.t Symbol.Table.t
+  ; premiums : Premiums.t Symbol.Table.t (** samples since the last funding *)
+  ; mutable next_premium_sample : int (** [Int.max_value] until the first oracle *)
   ; owner_orders : Symbol.t Order_id.Table.t Account.Table.t (** owner -> oid -> symbol *)
   ; client_ids : Order_id.t Client_order_id.Table.t Account.Table.t
   ; reserves : Reserve.t Account.Table.t
@@ -102,6 +120,10 @@ let create ?(config = Config.default) ?(self_trade = Order_book.Stp.default) () 
   ; marks = Symbol.Table.create ()
   ; last_trade = Symbol.Table.create ()
   ; funding_rates = Symbol.Table.create ()
+  ; oracles = Symbol.Table.create ()
+  ; indices = Symbol.Table.create ()
+  ; premiums = Symbol.Table.create ()
+  ; next_premium_sample = Int.max_value
   ; owner_orders = Account.Table.create ()
   ; client_ids = Account.Table.create ()
   ; reserves = Account.Table.create ()
@@ -892,18 +914,101 @@ let set_funding_rate t symbol rate =
 ;;
 
 let funding_rate t symbol =
-  Hashtbl.find t.funding_rates symbol
-  |> Option.value ~default:t.config.default_funding_rate
+  match Hashtbl.find t.funding_rates symbol with
+  | Some rate -> rate
+  | None ->
+    (match Hashtbl.find t.premiums symbol with
+     | None -> t.config.default_funding_rate
+     | Some premiums ->
+       Premium_funding.rate
+         t.config.premium_funding
+         ~average_premium:(Premiums.average premiums)
+         ~interval:(Time_ns.Span.of_int_ns t.config.funding_interval_ns))
 ;;
+
+let oracle t symbol = Hashtbl.find t.oracles symbol
 
 let apply_funding t =
   List.iter t.config.instruments ~f:(fun i ->
     let symbol = i.symbol in
-    Option.iter (mark t symbol) ~f:(fun mark ->
+    (* Paid on the oracle notional where there is an oracle, as on Hyperliquid. *)
+    let px =
+      match oracle t symbol with
+      | Some _ as px -> px
+      | None -> mark t symbol
+    in
+    Option.iter px ~f:(fun mark ->
       let rate = funding_rate t symbol in
+      Option.iter (Hashtbl.find t.premiums symbol) ~f:(fun (p : Premiums.t) ->
+        p.sum <- 0.;
+        p.count <- 0);
       let payments = Clearinghouse.apply_funding t.clearinghouse ~symbol ~rate ~mark in
       if not (List.is_empty payments)
       then emit t (Funding { symbol; rate; mark; payments; time = t.time })))
+;;
+
+let levels side = List.map side ~f:(fun (l : L2.Level.t) -> l.px, l.sz)
+
+(* Deep enough for any impact notional the simulators see. *)
+let impact_levels = 1000
+
+let impact_pxs t symbol =
+  match book t symbol with
+  | None -> None, None
+  | Some b ->
+    let bids, asks = Order_book.l2 b ~n_levels:impact_levels in
+    Premium_funding.impact_pxs
+      ~bids:(levels bids)
+      ~asks:(levels asks)
+      ~notional:(Premium_funding.Config.impact_notional t.config.premium_funding symbol)
+;;
+
+let premium t symbol =
+  Option.bind (Hashtbl.find t.premiums symbol) ~f:(fun (p : Premiums.t) -> p.last)
+;;
+
+let sample_premiums t =
+  Hashtbl.iteri t.oracles ~f:(fun ~key:symbol ~data:oracle ->
+    let impact_bid, impact_ask = impact_pxs t symbol in
+    let p =
+      Premium_funding.premium ~oracle:(Price.to_float oracle) ~impact_bid ~impact_ask
+    in
+    let premiums = Hashtbl.find_or_add t.premiums symbol ~default:Premiums.create in
+    premiums.sum <- premiums.sum +. p;
+    premiums.count <- premiums.count + 1;
+    premiums.last <- Some p)
+;;
+
+let set_oracle_internal t symbol px =
+  match instrument t symbol with
+  | None -> ()
+  | Some instrument ->
+    let interval = Time_ns.Span.to_int_ns t.config.premium_funding.sample_interval in
+    if Hashtbl.is_empty t.oracles
+    then t.next_premium_sample <- ((t.time / interval) + 1) * interval;
+    Hashtbl.set t.oracles ~key:symbol ~data:px;
+    ignore (Hashtbl.find_or_add t.premiums symbol ~default:Premiums.create : Premiums.t);
+    let index = Hashtbl.find_or_add t.indices symbol ~default:Price_index.create in
+    let b = book t symbol in
+    let px_of f = Option.bind b ~f |> Option.map ~f:Price.to_float in
+    let mark =
+      Price_index.update
+        index
+        ~now:t.time
+        ~oracle:(Price.to_float px)
+        ~mid:(px_of Order_book.mid)
+        ~best_bid:(px_of Order_book.best_bid)
+        ~best_ask:(px_of Order_book.best_ask)
+        ~last_trade:(Hashtbl.find t.last_trade symbol |> Option.map ~f:Price.to_float)
+    in
+    Hashtbl.set t.marks ~key:symbol ~data:(Instrument.round_price instrument mark);
+    liquidate t;
+    fire_triggers t
+;;
+
+let set_oracle t symbol px =
+  set_oracle_internal t symbol px;
+  record t (Set_oracle { symbol; px })
 ;;
 
 let step t ~now =
@@ -911,10 +1016,19 @@ let step t ~now =
   then
     raise_s
       [%message "Exchange.step: time went backwards" (now : int) ~time:(t.time : int)];
-  while t.next_funding <= now do
-    t.time <- t.next_funding;
-    apply_funding t;
-    t.next_funding <- t.next_funding + t.config.funding_interval_ns
+  (* Premium samples due at a funding boundary are taken before it is paid. *)
+  while Int.min t.next_funding t.next_premium_sample <= now do
+    if t.next_premium_sample <= t.next_funding
+    then (
+      t.time <- t.next_premium_sample;
+      sample_premiums t;
+      t.next_premium_sample
+      <- t.next_premium_sample
+         + Time_ns.Span.to_int_ns t.config.premium_funding.sample_interval)
+    else (
+      t.time <- t.next_funding;
+      apply_funding t;
+      t.next_funding <- t.next_funding + t.config.funding_interval_ns)
   done;
   t.time <- now;
   liquidate t;
@@ -943,4 +1057,5 @@ let apply t (input : Input.t) =
     ignore (place_trigger t account request trigger : Order_id.t * Order_status.t)
   | Modify_trigger { account; target; request; trigger } ->
     ignore (modify ~trigger t account target request : Order_status.t)
+  | Set_oracle { symbol; px } -> set_oracle t symbol px
 ;;
