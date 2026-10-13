@@ -377,7 +377,12 @@ let liquidation_px t ~mark ~equity ~maintenance (p : Position.t) =
   let l = 1. /. Float.of_int (2 * max_leverage t p.symbol) in
   let margin_available = Usd.to_float equity -. Usd.to_float maintenance in
   let liq = mark_px -. (side *. margin_available /. size /. (1. -. (l *. side))) in
-  if Float.( > ) liq 0. then Some ((Price.of_float [@alert "-lossy"]) liq) else None
+  (* A small short against a large balance can put the estimate beyond what a [Price] can
+     hold (above about 4.6e10); such a position cannot be liquidated, so [None]. *)
+  let max_px = Float.of_int (Int.max_value / Price.units_per_one) in
+  if Float.( > ) liq 0. && Float.( < ) liq max_px
+  then Some ((Price.of_float [@alert "-lossy"]) liq)
+  else None
 ;;
 
 let view t account ~mark ~time : Account_view.t =
