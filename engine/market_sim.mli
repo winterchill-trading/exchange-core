@@ -45,6 +45,11 @@ module Config : sig
         factor when one lot at the price is worth more than [min_notional], and a size
         never rounds below one lot. *)
     ; max_notional : float
+    ; oracle_interval : Time_ns.Span.t option
+    (** [None]: every tick sets the exchange's mark to the reference price. [Some i]: the
+        reference is published as the oracle price ({!Exchange.set_oracle}) instead, at
+        most once per [i] of exchange time (Hyperliquid: 3 s), and the exchange derives
+        the mark from it and the book. *)
     }
   [@@deriving sexp_of]
 
@@ -59,7 +64,7 @@ module Config : sig
   (** Seed 0, all instruments, [default_prices] of {!Exchange.Config.default_instruments},
       5 bps/s, 10 traders with $10M each, 100ms ticks, up to 5 orders per instrument per
       trader, probabilities 0.3 / 0.1 / 0.02, offsets up to 25 bps, $20 to $2000 per
-      order, no inside-touch orders. *)
+      order, no inside-touch orders, no oracle. *)
   val default : t
 
   (** [default] with seed [seed] and the flow parameters drawn from a generator seeded by

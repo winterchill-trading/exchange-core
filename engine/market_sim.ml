@@ -18,6 +18,7 @@ module Config = struct
     ; max_offset_bps : float
     ; min_notional : float
     ; max_notional : float
+    ; oracle_interval : Time_ns.Span.t option
     }
   [@@deriving sexp_of]
 
@@ -50,6 +51,7 @@ module Config = struct
     ; max_offset_bps = 25.
     ; min_notional = 20.
     ; max_notional = 2000.
+    ; oracle_interval = None
     }
   ;;
 
@@ -85,6 +87,7 @@ module Market = struct
     (** fraction of [anchor - reference] added each tick; [0.] pins the reference to the
         anchor instead of walking *)
     ; mutable noise_traders : int (** traders [0 .. noise_traders - 1] trade it *)
+    ; mutable oracle_at : int option (** exchange time of the last oracle update *)
     }
 
   let symbol t = t.instrument.symbol
@@ -123,6 +126,7 @@ let create (config : Config.t) exchange =
         ; anchor = None
         ; pull = 0.
         ; noise_traders = config.noise_traders
+        ; oracle_at = None
         }
       | None -> raise_s [%message "Market_sim: unknown symbol" (symbol : Symbol.t)])
   in
@@ -155,11 +159,23 @@ let reference_price t symbol =
   |> Option.map ~f:(fun (m : Market.t) -> Instrument.round_price m.instrument m.reference)
 ;;
 
-let set_mark t (m : Market.t) =
-  Exchange.set_mark
-    t.exchange
-    (Market.symbol m)
-    (Instrument.round_price m.instrument m.reference)
+(* Publishes the reference: as the mark, or with [oracle_interval] as the oracle price (at
+   once when [force], else once the interval has passed on the exchange clock). *)
+let set_mark ?(force = false) t (m : Market.t) =
+  let px = Instrument.round_price m.instrument m.reference in
+  match t.config.oracle_interval with
+  | None -> Exchange.set_mark t.exchange (Market.symbol m) px
+  | Some interval ->
+    let now = Exchange.now t.exchange in
+    let due =
+      match m.oracle_at with
+      | None -> true
+      | Some at -> force || now - at >= Time_ns.Span.to_int_ns interval
+    in
+    if due
+    then (
+      m.oracle_at <- Some now;
+      Exchange.set_oracle t.exchange (Market.symbol m) px)
 ;;
 
 let set_reference ?half_life t symbol px =
@@ -173,7 +189,7 @@ let set_reference ?half_life t symbol px =
   | None ->
     m.pull <- 0.;
     m.reference <- anchor;
-    set_mark t m
+    set_mark ~force:true t m
   | Some half_life ->
     if Time_ns.Span.(half_life <= zero)
     then
