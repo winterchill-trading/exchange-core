@@ -75,6 +75,7 @@ let attach t exchange =
           (t.header : Header.t)];
   Exchange.record_inputs exchange ~f:(write t)
 ;;
+
 let length t = t.length
 let flush t = Out_channel.flush t.out
 let close t = Out_channel.close t.out

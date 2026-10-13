@@ -202,7 +202,8 @@ let%expect_test "default headers keep the original format" =
         ~bad_header:
           (Journal.of_string_with_header (Journal.magic_with_header ^ "\255")
            : (Journal.Header.t * Input.t list) Or_error.t)];
-  [%expect {|
+  [%expect
+    {|
     ((same_bytes true) (magic EXJRNL01)
      (expire_maker (Ok (((self_trade Expire_maker)) ((Step (now 1))))))
      (bad_header
@@ -219,7 +220,8 @@ let%expect_test "default headers keep the original format" =
    | exception exn -> print_s [%sexp (exn : exn)]);
   Journal.close journal;
   Stdlib.Sys.remove path;
-  [%expect {|
+  [%expect
+    {|
     ("Journal.attach: the exchange's self-trade policy differs from the header"
      (self_trade Cancel_taker) (t.header ((self_trade Cancel_both))))
     |}]
