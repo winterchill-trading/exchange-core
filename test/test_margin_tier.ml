@@ -7,7 +7,7 @@ let tier lower_bound max_leverage =
 ;;
 
 (* Hyperliquid's mainnet BTC tiers, and its testnet ETH tiers (three tiers). *)
-let btc = [ tier "0" 40; tier "150000000" 20 ]
+let btc_tiers = [ tier "0" 40; tier "150000000" 20 ]
 let eth_testnet = [ tier "0" 25; tier "20000" 10; tier "50000" 5 ]
 
 let%expect_test "maintenance margin is continuous across tiers" =
@@ -19,7 +19,7 @@ let%expect_test "maintenance margin is continuous across tiers" =
       (Margin_tier.find tiers ~notional).max_leverage
       (Usd.to_string (Margin_tier.maintenance tiers ~notional))
   in
-  List.iter [ "1000"; "150000000"; "150000001"; "200000000" ] ~f:(show btc);
+  List.iter [ "1000"; "150000000"; "150000001"; "200000000" ] ~f:(show btc_tiers);
   [%expect
     {|
          1000   40x  12.5
@@ -47,7 +47,7 @@ let%expect_test "validation" =
     | () -> print_endline "ok"
     | exception exn -> print_s (Exn.sexp_of_t exn)
   in
-  check btc;
+  check btc_tiers;
   check [];
   check [ tier "10" 40 ];
   check [ tier "0" 40; tier "100" 40 ];
@@ -67,7 +67,7 @@ let%expect_test "validation" =
     |}];
   (match
      Instrument.create
-       ~margin_tiers:btc
+       ~margin_tiers:btc_tiers
        (Symbol.of_string "BTC")
        ~size_decimals:5
        ~price_tick:(px "0.1")
@@ -79,5 +79,60 @@ let%expect_test "validation" =
     {|
     ("Instrument.create: the first margin tier's leverage must be max_leverage"
      (max_leverage 50) (first ((lower_bound 0) (max_leverage 40))))
+    |}]
+;;
+
+let%expect_test "an exchange with margin tiers" =
+  let btc_tiered =
+    Instrument.create
+      ~margin_tiers:[ tier "0" 40; tier "10000" 25; tier "50000" 10 ]
+      btc
+      ~size_decimals:5
+      ~price_tick:(px "0.1")
+      ~max_leverage:40
+  in
+  let ex =
+    Exchange_core_engine.Exchange.create
+      ~config:
+        { Exchange_core_engine.Exchange.Config.default with instruments = [ btc_tiered ] }
+      ()
+  in
+  let module Exchange = Exchange_core_engine.Exchange in
+  List.iter [ 1; 2 ] ~f:(fun n -> Exchange.deposit ex (acct n) (usd "100000"));
+  let leverage n l =
+    print_s [%sexp (Exchange.set_leverage ex (acct n) btc l : unit Or_error.t)]
+  in
+  (* Flat: any leverage up to the first tier's. *)
+  leverage 1 40;
+  ignore
+    (Exchange.place
+       ex
+       (acct 2)
+       (Order_request.limit btc Sell ~px:(px "100000") ~size:(sz "0.3"))
+     : Order_status.t);
+  ignore
+    (Exchange.place
+       ex
+       (acct 1)
+       (Order_request.limit btc Buy ~px:(px "100000") ~size:(sz "0.3"))
+     : Order_status.t);
+  (* A 30,000 position sits in the 25x tier. *)
+  leverage 1 40;
+  leverage 1 25;
+  let view = Exchange.account_view ex (acct 1) in
+  print_s
+    [%message
+      ""
+        ~maintenance:(view.maintenance_margin : Usd.t)
+        ~liquidation_px:
+          (List.map view.positions ~f:(fun p -> p.liquidation_px) : Price.t option list)];
+  [%expect
+    {|
+    (Ok ())
+    (Error
+     ("Leverage above the margin tier of the position" (symbol BTC) (leverage 40)
+      (max_leverage 25) (notional 30000)))
+    (Ok ())
+    ((maintenance 525) (liquidation_px (())))
     |}]
 ;;
