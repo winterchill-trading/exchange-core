@@ -27,7 +27,7 @@ let%expect_test "minor words per call" =
   [%expect
     {|
     step                 17
-    submit IOC buy+sell  462
+    submit IOC buy+sell  456
     submit+cancel        333
     maker submit+cancel  934
     |}]
