@@ -242,7 +242,7 @@ let random_size t (m : Market.t) ~px =
   Size.max
     lot
     (Size.round_down
-       (Size.of_float (notional /. px))
+       ((Size.of_float [@alert "-lossy"]) (notional /. px))
        ~decimals:m.instrument.size_decimals)
 ;;
 
