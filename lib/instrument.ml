@@ -66,7 +66,7 @@ let round_to_tick t px =
 ;;
 
 let round_price t x =
-  let px = Price.of_float x in
+  let px = (Price.of_float [@alert "-lossy"]) x in
   let sig_decimals =
     Option.map t.max_significant_figures ~f:(fun n ->
       let int_digits = Float.iround_down_exn (Float.log10 x) + 1 in
