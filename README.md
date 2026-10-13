@@ -115,6 +115,21 @@ A journal file is the magic string `EXJRNL01` followed by one `bin_prot` value p
 The wire shape uses only integers (units of `10^-8`), strings and floats, so it does not
 change when the in-memory types do. A truncated last record is reported by `load`.
 
+Settings outside `Config.t` go in a `Journal.Header.t`; today that is the self-trade
+policy. An exchange with a non-default policy is journalled with the magic string
+`EXJRNL02` and a `bin_prot` header before the inputs; with the default policy the file
+is written exactly as before, so existing journals keep their bytes and replay
+unchanged. `Journal.attach` raises if the header does not match the exchange.
+
+```ocaml
+let ex = Exchange.create ~self_trade:Expire_maker () in
+let journal = Journal.create ~header:{ self_trade = Expire_maker } "run.journal" in
+Journal.attach journal ex;
+(* ... *)
+let header, inputs = ok_exn (Journal.load_with_header "run.journal") in
+let replayed = Journal.replay ~header inputs in
+```
+
 Events carry consecutive sequence numbers from 1 (`drain_numbered_events`).
 `Book_replay` applies them to its own order books and must see every number in order;
 the tests check its L2 against `Exchange.l2` after every tick of a seeded simulation.
@@ -171,6 +186,17 @@ keep their format and an anchored run replays bit for bit.
   recorded with `Exchange.reject` carry an id only if the front end passes one. Front ends convert timestamps to their venue's unit.
 - **Matching** is price-time priority with maker-price fills and self-trade prevention;
   see the [order-book](https://github.com/winterchill-trading/order-book) design notes.
+- **Self-trade prevention** is chosen per exchange with `Exchange.create ?self_trade`
+  (an `Order_book.Stp.t`, applied to every book):
+
+  | Policy | Taker that meets its own resting order | Own resting order |
+  | --- | --- | --- |
+  | `Cancel_taker` (default; Binance and Bybit simulators) | remainder cancelled; `Rejected Self_trade` if nothing filled | stays |
+  | `Expire_maker` (Hyperliquid simulator) | keeps matching behind it; never rejected for self-trade | `Order_cancelled` with reason `Self_trade`, reserved margin released |
+  | `Cancel_both` | as `Cancel_taker` | as `Expire_maker` |
+
+  Expired orders are reported after the taker's fills and before its own events, so a
+  book rebuilt from events never sees the taker rest across them.
   Market orders are IOC orders priced `slippage_bps` (default 5%) through the best
   opposite price.
 - **Order statuses.** An order that rests (even after partial fills) is `Resting`; an
