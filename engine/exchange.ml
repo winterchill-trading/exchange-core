@@ -57,12 +57,18 @@ type t =
   ; mutable recorders : (Input.t -> unit) list (** oldest first *)
   ; mutable time : int
   ; mutable next_oid : int
-  ; mutable next_tid : int
+  ; next_tid : unit -> Trade_id.t (** built once so a submit does not allocate it *)
   ; mutable next_funding : int
   }
 
 let create ?(config = Config.default) () =
   let books = Symbol.Table.create () in
+  let trade_ids = ref 1 in
+  let next_tid () =
+    let tid = !trade_ids in
+    trade_ids := tid + 1;
+    Trade_id.of_int tid
+  in
   List.iter config.instruments ~f:(fun i ->
     Hashtbl.set books ~key:i.symbol ~data:(Order_book.create i.symbol));
   { config
@@ -80,7 +86,7 @@ let create ?(config = Config.default) () =
   ; recorders = []
   ; time = 0
   ; next_oid = 1
-  ; next_tid = 1
+  ; next_tid
   ; next_funding = config.funding_interval_ns
   }
 ;;
@@ -267,16 +273,13 @@ let submit
   ~limit_px
   ~order_id
   ~client_order_id
-  ~(submit : oid:Order_id.t -> next_tid:(unit -> Trade_id.t) -> Order_book.Result.t)
+  ~(submit :
+      (oid:Order_id.t -> next_tid:(unit -> Trade_id.t) -> Order_book.Result.t)
+      @ local)
   : Order_status.t
   =
   let book = Option.value_exn (book t symbol) in
-  let next_tid () =
-    let tid = t.next_tid in
-    t.next_tid <- t.next_tid + 1;
-    Trade_id.of_int tid
-  in
-  let r = submit ~oid:order_id ~next_tid in
+  let r = submit ~oid:order_id ~next_tid:t.next_tid in
   List.iter r.fills ~f:(record_fill t book);
   let order ~size : Open_order.t =
     { symbol
