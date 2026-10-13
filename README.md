@@ -186,6 +186,8 @@ keep their format and an anchored run replays bit for bit.
   recorded with `Exchange.reject` carry an id only if the front end passes one. Front ends convert timestamps to their venue's unit.
 - **Matching** is price-time priority with maker-price fills and self-trade prevention;
   see the [order-book](https://github.com/winterchill-trading/order-book) design notes.
+  Market orders are IOC orders priced `slippage_bps` (default 5%) through the best
+  opposite price.
 - **Self-trade prevention** is chosen per exchange with `Exchange.create ?self_trade`
   (an `Order_book.Stp.t`, applied to every book):
 
@@ -197,8 +199,6 @@ keep their format and an anchored run replays bit for bit.
 
   Expired orders are reported after the taker's fills and before its own events, so a
   book rebuilt from events never sees the taker rest across them.
-  Market orders are IOC orders priced `slippage_bps` (default 5%) through the best
-  opposite price.
 - **Order statuses.** An order that rests (even after partial fills) is `Resting`; an
   IOC or market order with any fill is `Filled` with the filled size and average price;
   an IOC order with no fill, an ALO order that would cross and failed checks are
