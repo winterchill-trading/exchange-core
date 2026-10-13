@@ -101,6 +101,10 @@ val mids : t -> (Symbol.t * Price.t) list
 (** Resting orders, newest first. *)
 val open_orders : t -> Account.t -> Open_order.t list
 
+(** Initial margin held by the account's resting orders that are not reduce-only:
+    [px * remaining / leverage] per order, at the account's current leverage. *)
+val reserved_margin : t -> Account.t -> Usd.t
+
 (** Executions, newest first. *)
 val fills : t -> Account.t -> Execution.t list
 
