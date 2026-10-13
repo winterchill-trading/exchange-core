@@ -51,12 +51,15 @@ let match_round_trip ex () =
   ignore (Exchange.drain_events ex : Event.t list)
 ;;
 
-let place_and_cancel ex () =
+let place_and_cancel_as account ex () =
   match
-    Exchange.place_with_order_id ex taker (limit Buy (px (best_bid - 1_000)) min_size)
+    Exchange.place_with_order_id ex account (limit Buy (px (best_bid - 1_000)) min_size)
   with
   | oid, Resting _ ->
-    ignore (Exchange.cancel ex taker ~symbol:btc oid : Cancel_status.t);
+    ignore (Exchange.cancel ex account ~symbol:btc oid : Cancel_status.t);
     ignore (Exchange.drain_events ex : Event.t list)
   | _, status -> raise_s [%message "Scenario: not resting" (status : Order_status.t)]
 ;;
+
+let place_and_cancel = place_and_cancel_as taker
+let maker_place_and_cancel = place_and_cancel_as maker

@@ -23,3 +23,6 @@ val match_round_trip : Exchange.t -> unit -> unit
 
 (** A passive bid below the book that rests, then its cancel, then drains the events. *)
 val place_and_cancel : Exchange.t -> unit -> unit
+
+(** The same for the maker, whose margin check walks its [n_resting] resting orders. *)
+val maker_place_and_cancel : Exchange.t -> unit -> unit
