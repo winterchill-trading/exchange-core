@@ -202,14 +202,21 @@ let remove_resting t ~symbol oid ~reason =
     true
 ;;
 
+(* Margin held by [account]'s resting orders, summed straight from the owner index instead
+   of building a list of orders. *)
 let reserved_margin t account =
-  resting_orders_of t account
-  |> List.filter ~f:(fun (_, (o : Order_book.Resting_order.t)) -> not o.reduce_only)
-  |> List.map ~f:(fun (symbol, (o : Order_book.Resting_order.t)) ->
-    Usd.div_int
-      (Notional.mul o.px o.remaining)
-      (Clearinghouse.leverage t.clearinghouse account symbol))
-  |> Usd.sum
+  match Hashtbl.find t.owner_orders account with
+  | None -> Usd.zero
+  | Some tbl ->
+    Hashtbl.fold tbl ~init:Usd.zero ~f:(fun ~key:oid ~data:symbol acc ->
+      match Option.bind (book t symbol) ~f:(fun b -> Order_book.find b oid) with
+      | Some (o : Order_book.Resting_order.t) when not o.reduce_only ->
+        Usd.( + )
+          acc
+          (Usd.div_int
+             (Notional.mul o.px o.remaining)
+             (Clearinghouse.leverage t.clearinghouse account symbol))
+      | Some _ | None -> acc)
 ;;
 
 (* Matching results *)
