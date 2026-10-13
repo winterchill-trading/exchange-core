@@ -30,8 +30,8 @@ let side_char : Side.t -> string = function
   | Sell -> "A"
 ;;
 
-let fresh () =
-  let ex = Exchange.create () in
+let fresh ?self_trade () =
+  let ex = Exchange.create ?self_trade () in
   List.iter [ 1; 2; 3 ] ~f:(fun n -> Exchange.deposit ex (acct n) (usd "10000"));
   ex
 ;;
@@ -638,4 +638,104 @@ let%expect_test "random flow with steps and marks: zero net position, uncrossed 
         ~liquidations:(!liquidations > 0 : bool)
         ~fundings:(!fundings > 100 : bool)];
   [%expect {| ((fills true) (liquidations true) (fundings true)) |}]
+;;
+
+(* Account 1 rests an ask at 100000 behind account 2's ask at 99900 and above account 3's
+   ask at 100100, then buys through all three under each policy. *)
+let%expect_test "self-trade policies" =
+  List.iter Order_book.Stp.all ~f:(fun self_trade ->
+    let ex = fresh ~self_trade () in
+    print_s [%sexp (self_trade : Order_book.Stp.t)];
+    place ex 2 Sell "99900" "0.01";
+    place ex 1 Sell "100000" "0.01" ~cid:(cid 1);
+    place ex 3 Sell "100100" "0.01";
+    let reserved_before = Exchange.reserved_margin ex (acct 1) in
+    place ex 1 Buy "100100" "0.03";
+    print_events ex;
+    print_s
+      [%message
+        ""
+          (reserved_before : Usd.t)
+          ~reserved_after:(Exchange.reserved_margin ex (acct 1) : Usd.t)
+          ~open_orders:
+            (List.map (Exchange.open_orders ex (acct 1)) ~f:(fun o -> o.order_id)
+             : Order_id.t list)];
+    (* The client id of an expired order is free again. *)
+    place ex 1 Sell "101000" "0.01" ~cid:(cid 1);
+    ignore (Exchange.drain_events ex : Event.t list));
+  [%expect
+    {|
+    Cancel_taker
+    (Resting (order_id 1) (client_order_id ()))
+    (Resting (order_id 2) (client_order_id (c1)))
+    (Resting (order_id 3) (client_order_id ()))
+    (Filled (order_id 4) (total 0.01) (avg_px 99900) (client_order_id ()))
+    accepted 0002 oid=1 A 0.01@99900
+    accepted 0001 oid=2 A 0.01@100000
+    accepted 0003 oid=3 A 0.01@100100
+    fill tid=1 0.01@99900 taker=0001(Open_long fee 0.34965) maker=0002(Open_short fee 0.0999)
+    filled 0002 oid=1 A 0@99900
+    cancelled 0001 oid=4 B 0.02@100100 Self_trade
+    ((reserved_before 50) (reserved_after 50) (open_orders (2)))
+    (Rejected Duplicate_client_order_id)
+    Expire_maker
+    (Resting (order_id 1) (client_order_id ()))
+    (Resting (order_id 2) (client_order_id (c1)))
+    (Resting (order_id 3) (client_order_id ()))
+    (Resting (order_id 4) (client_order_id ()))
+    accepted 0002 oid=1 A 0.01@99900
+    accepted 0001 oid=2 A 0.01@100000
+    accepted 0003 oid=3 A 0.01@100100
+    fill tid=1 0.01@99900 taker=0001(Open_long fee 0.34965) maker=0002(Open_short fee 0.0999)
+    filled 0002 oid=1 A 0@99900
+    fill tid=2 0.01@100100 taker=0001(Open_long fee 0.35035) maker=0003(Open_short fee 0.1001)
+    filled 0003 oid=3 A 0@100100
+    cancelled 0001 oid=2 A 0.01@100000 Self_trade
+    accepted 0001 oid=4 B 0.01@100100
+    ((reserved_before 50) (reserved_after 50.05) (open_orders (4)))
+    (Resting (order_id 5) (client_order_id (c1)))
+    Cancel_both
+    (Resting (order_id 1) (client_order_id ()))
+    (Resting (order_id 2) (client_order_id (c1)))
+    (Resting (order_id 3) (client_order_id ()))
+    (Filled (order_id 4) (total 0.01) (avg_px 99900) (client_order_id ()))
+    accepted 0002 oid=1 A 0.01@99900
+    accepted 0001 oid=2 A 0.01@100000
+    accepted 0003 oid=3 A 0.01@100100
+    fill tid=1 0.01@99900 taker=0001(Open_long fee 0.34965) maker=0002(Open_short fee 0.0999)
+    filled 0002 oid=1 A 0@99900
+    cancelled 0001 oid=2 A 0.01@100000 Self_trade
+    cancelled 0001 oid=4 B 0.02@100100 Self_trade
+    ((reserved_before 50) (reserved_after 0) (open_orders ()))
+    (Resting (order_id 5) (client_order_id (c1)))
+    |}]
+;;
+
+let%expect_test "a taker that reaches only its own order" =
+  List.iter Order_book.Stp.all ~f:(fun self_trade ->
+    let ex = fresh ~self_trade () in
+    print_s [%sexp (self_trade : Order_book.Stp.t)];
+    place ex 1 Sell "100000" "0.01";
+    place ex 1 Buy "100000" "0.01";
+    place ex 1 Sell "100000" "0.01";
+    place ex 1 ~tif:Ioc Buy "100000" "0.01";
+    ignore (Exchange.drain_events ex : Event.t list));
+  [%expect
+    {|
+    Cancel_taker
+    (Resting (order_id 1) (client_order_id ()))
+    (Rejected Self_trade)
+    (Resting (order_id 3) (client_order_id ()))
+    (Rejected Self_trade)
+    Expire_maker
+    (Resting (order_id 1) (client_order_id ()))
+    (Resting (order_id 2) (client_order_id ()))
+    (Resting (order_id 3) (client_order_id ()))
+    (Rejected No_liquidity)
+    Cancel_both
+    (Resting (order_id 1) (client_order_id ()))
+    (Rejected Self_trade)
+    (Resting (order_id 3) (client_order_id ()))
+    (Rejected Self_trade)
+    |}]
 ;;
