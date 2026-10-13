@@ -42,6 +42,25 @@ end
 
 module Target = Target
 
+(* Margin held by one account's resting orders, kept up to date as orders rest, fill and
+   leave the book. Each order's share is [px * remaining / leverage], truncated per order,
+   so the total is that of a walk over the orders. *)
+module Reserve = struct
+  type entry =
+    { mutable leverage : int (** leverage the symbol's shares were computed at *)
+    ; mutable total : Usd.t
+    }
+
+  type t =
+    { shares : Usd.t Order_id.Table.t (** non-zero shares only *)
+    ; by_symbol : entry Symbol.Table.t
+    }
+
+  let create () =
+    { shares = Order_id.Table.create (); by_symbol = Symbol.Table.create () }
+  ;;
+end
+
 type t =
   { config : Config.t
   ; clearinghouse : Clearinghouse.t
@@ -51,6 +70,7 @@ type t =
   ; funding_rates : float Symbol.Table.t
   ; owner_orders : Symbol.t Order_id.Table.t Account.Table.t (** owner -> oid -> symbol *)
   ; client_ids : Order_id.t Client_order_id.Table.t Account.Table.t
+  ; reserves : Reserve.t Account.Table.t
   ; fills : Execution.t list Account.Table.t (** newest first *)
   ; events : Event.Numbered.t Queue.t
   ; mutable next_seq : int
@@ -80,6 +100,7 @@ let create ?(config = Config.default) () =
   ; funding_rates = Symbol.Table.create ()
   ; owner_orders = Account.Table.create ()
   ; client_ids = Account.Table.create ()
+  ; reserves = Account.Table.create ()
   ; fills = Account.Table.create ()
   ; events = Queue.create ()
   ; next_seq = 1
@@ -152,16 +173,83 @@ let client_id_index t account =
   Hashtbl.find_or_add t.client_ids account ~default:Client_order_id.Table.create
 ;;
 
+(* Reserved margin *)
+
+let leverage_of t account symbol = Clearinghouse.leverage t.clearinghouse account symbol
+
+let order_share ~leverage (o : Order_book.Resting_order.t) =
+  if o.reduce_only then Usd.zero else Usd.div_int (Notional.mul o.px o.remaining) leverage
+;;
+
+let find_resting t ~symbol oid =
+  Option.bind (book t symbol) ~f:(fun b -> Order_book.find b oid)
+;;
+
+let reserve_entry t account symbol =
+  let r = Hashtbl.find_or_add t.reserves account ~default:Reserve.create in
+  let e =
+    Hashtbl.find_or_add r.by_symbol symbol ~default:(fun () ->
+      { Reserve.leverage = leverage_of t account symbol; total = Usd.zero })
+  in
+  r, e
+;;
+
+(* Recomputes the share of [oid] from the book (zero once it has left it). Shares stay at
+   the entry's leverage; a leverage change is picked up by [reserved_margin]. *)
+let refresh_reserve t ~owner ~symbol oid =
+  let r, (e : Reserve.entry) = reserve_entry t owner symbol in
+  let old = Option.value (Hashtbl.find r.shares oid) ~default:Usd.zero in
+  let share =
+    match find_resting t ~symbol oid with
+    | Some o when Account.equal o.owner owner -> order_share ~leverage:e.leverage o
+    | Some _ | None -> Usd.zero
+  in
+  if Usd.is_zero share
+  then Hashtbl.remove r.shares oid
+  else Hashtbl.set r.shares ~key:oid ~data:share;
+  e.total <- Usd.( + ) (Usd.( - ) e.total old) share
+;;
+
+(* Recomputes every share of [account] in [symbol] at [leverage]. *)
+let recompute_reserve t (r : Reserve.t) (e : Reserve.entry) account symbol ~leverage =
+  e.leverage <- leverage;
+  e.total <- Usd.zero;
+  Option.iter (Hashtbl.find t.owner_orders account) ~f:(fun tbl ->
+    Hashtbl.iteri tbl ~f:(fun ~key:oid ~data:s ->
+      if Symbol.equal s symbol
+      then (
+        Hashtbl.remove r.shares oid;
+        Option.iter (find_resting t ~symbol oid) ~f:(fun o ->
+          let share = order_share ~leverage o in
+          if not (Usd.is_zero share)
+          then (
+            Hashtbl.set r.shares ~key:oid ~data:share;
+            e.total <- Usd.( + ) e.total share)))))
+;;
+
+let reserved_margin t account =
+  match Hashtbl.find t.reserves account with
+  | None -> Usd.zero
+  | Some r ->
+    Hashtbl.fold r.by_symbol ~init:Usd.zero ~f:(fun ~key:symbol ~data:e acc ->
+      let leverage = leverage_of t account symbol in
+      if leverage <> e.leverage then recompute_reserve t r e account symbol ~leverage;
+      Usd.( + ) acc e.total)
+;;
+
 let index_resting t (o : Order_book.Resting_order.t) ~symbol =
   Hashtbl.set (owner_index t o.owner) ~key:o.oid ~data:symbol;
   Option.iter o.cloid ~f:(fun cid ->
-    Hashtbl.set (client_id_index t o.owner) ~key:cid ~data:o.oid)
+    Hashtbl.set (client_id_index t o.owner) ~key:cid ~data:o.oid);
+  refresh_reserve t ~owner:o.owner ~symbol o.oid
 ;;
 
-let unindex t ~owner ~oid ~cloid =
+(* Called once the order has left the book. *)
+let unindex t ~owner ~symbol ~oid ~cloid =
   Option.iter (Hashtbl.find t.owner_orders owner) ~f:(fun tbl -> Hashtbl.remove tbl oid);
   Option.iter cloid ~f:(fun cid ->
-    Option.iter (Hashtbl.find t.client_ids owner) ~f:(fun tbl -> Hashtbl.remove tbl cid))
+    Option.iter (Hashtbl.find t.client_ids owner) ~f:(fun tbl -> Hashtbl.remove tbl cid));
+  refresh_reserve t ~owner ~symbol oid
 ;;
 
 let open_order_of_resting ~symbol ?size (o : Order_book.Resting_order.t) : Open_order.t =
@@ -190,7 +278,7 @@ let remove_resting t ~symbol oid ~reason =
   match Option.bind (book t symbol) ~f:(fun b -> Order_book.cancel b oid) with
   | None -> false
   | Some o ->
-    unindex t ~owner:o.owner ~oid ~cloid:o.cloid;
+    unindex t ~owner:o.owner ~symbol ~oid ~cloid:o.cloid;
     emit
       t
       (Order_cancelled
@@ -202,23 +290,6 @@ let remove_resting t ~symbol oid ~reason =
     true
 ;;
 
-(* Margin held by [account]'s resting orders, summed straight from the owner index instead
-   of building a list of orders. *)
-let reserved_margin t account =
-  match Hashtbl.find t.owner_orders account with
-  | None -> Usd.zero
-  | Some tbl ->
-    Hashtbl.fold tbl ~init:Usd.zero ~f:(fun ~key:oid ~data:symbol acc ->
-      match Option.bind (book t symbol) ~f:(fun b -> Order_book.find b oid) with
-      | Some (o : Order_book.Resting_order.t) when not o.reduce_only ->
-        Usd.( + )
-          acc
-          (Usd.div_int
-             (Notional.mul o.px o.remaining)
-             (Clearinghouse.leverage t.clearinghouse account symbol))
-      | Some _ | None -> acc)
-;;
-
 (* Matching results *)
 
 let record_fill t book (fill : Order_book.Fill.t) =
@@ -228,12 +299,18 @@ let record_fill t book (fill : Order_book.Fill.t) =
   Hashtbl.set t.last_trade ~key:fill.symbol ~data:fill.px;
   emit t (Fill { fill; taker; maker });
   (* A maker that is no longer on the book was filled completely. *)
-  if Option.is_none (Order_book.find book fill.maker_oid)
-  then (
+  if Option.is_some (Order_book.find book fill.maker_oid)
+  then refresh_reserve t ~owner:fill.maker ~symbol:fill.symbol fill.maker_oid
+  else (
     let tbl = Hashtbl.find t.owner_orders fill.maker in
     if Option.value_map tbl ~default:false ~f:(fun tbl -> Hashtbl.mem tbl fill.maker_oid)
     then (
-      unindex t ~owner:fill.maker ~oid:fill.maker_oid ~cloid:fill.maker_cloid;
+      unindex
+        t
+        ~owner:fill.maker
+        ~symbol:fill.symbol
+        ~oid:fill.maker_oid
+        ~cloid:fill.maker_cloid;
       emit
         t
         (Order_filled
