@@ -6,6 +6,7 @@ type t =
   ; mutable balance : Usd.t
   ; positions : Position.t Symbol.Table.t
   ; leverage : int Symbol.Table.t
+  ; mutable position_list : Position.t list [@sexp_drop_if Fn.const true]
   }
 [@@deriving sexp_of]
 
@@ -14,6 +15,7 @@ let create account =
   ; balance = Usd.zero
   ; positions = Symbol.Table.create ()
   ; leverage = Symbol.Table.create ()
+  ; position_list = []
   }
 ;;
 
@@ -26,8 +28,21 @@ let position t symbol =
 ;;
 
 let position_or_create t symbol =
-  Hashtbl.find_or_add t.positions symbol ~default:(fun () -> Position.create symbol)
+  match Hashtbl.find t.positions symbol with
+  | Some p -> p
+  | None ->
+    let p = Position.create symbol in
+    Hashtbl.set t.positions ~key:symbol ~data:p;
+    t.position_list <- p :: t.position_list;
+    p
 ;;
+
+let rec any_open = function
+  | [] -> false
+  | p :: rest -> (not (Position.is_flat p)) || any_open rest
+;;
+
+let has_open_position t = any_open t.position_list
 
 let open_positions t =
   Hashtbl.data t.positions

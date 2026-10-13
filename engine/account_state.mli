@@ -10,6 +10,8 @@ type t = private
   ; mutable balance : Usd.t
   ; positions : Position.t Symbol.Table.t
   ; leverage : int Symbol.Table.t (** per-instrument leverage overrides *)
+  ; mutable position_list : Position.t list
+  (** the records in [positions], flat ones included, for iterating without allocating *)
   }
 [@@deriving sexp_of]
 
@@ -21,6 +23,8 @@ val position : t -> Symbol.t -> Position.t option
 
 (** The position record in [symbol], created flat if absent. *)
 val position_or_create : t -> Symbol.t -> Position.t
+
+val has_open_position : t -> bool
 
 (** Non-flat positions, sorted by symbol. *)
 val open_positions : t -> Position.t list
