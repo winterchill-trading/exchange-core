@@ -25,8 +25,8 @@ let%expect_test "minor words per call" =
     ~f:(fun (name, f) -> printf "%-20s %d\n" name (words_per_run f));
   [%expect
     {|
-    step                 77828
-    submit IOC buy+sell  562
+    step                 49015
+    submit IOC buy+sell  546
     submit+cancel        356
     |}]
 ;;
