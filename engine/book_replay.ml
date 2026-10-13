@@ -6,10 +6,10 @@ type t =
   ; mutable next_seq : int
   }
 
-let create ?(next_seq = 1) symbols =
+let create ?(next_seq = 1) ?self_trade symbols =
   let books = Symbol.Table.create () in
   List.iter symbols ~f:(fun symbol ->
-    Hashtbl.set books ~key:symbol ~data:(Order_book.create symbol));
+    Hashtbl.set books ~key:symbol ~data:(Order_book.create ?stp:self_trade symbol));
   { books; next_seq }
 ;;
 

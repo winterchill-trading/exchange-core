@@ -15,8 +15,11 @@ open! Exchange_core
 type t
 
 (** Empty books for [symbols]. [next_seq] defaults to 1, the first event of an
-    exchange. *)
-val create : ?next_seq:int -> Symbol.t list -> t
+    exchange. [self_trade] should be the exchange's policy (default
+    [Order_book.Stp.default]); rebuilt books never match, so it only matters to code that
+    inspects them with {!book}. Own orders expired by self-trade prevention arrive as
+    [Order_cancelled] events and are removed like any cancel. *)
+val create : ?next_seq:int -> ?self_trade:Order_book.Stp.t -> Symbol.t list -> t
 
 (** Sequence number of the next expected event. *)
 val next_seq : t -> int
