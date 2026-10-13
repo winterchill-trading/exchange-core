@@ -221,6 +221,50 @@ keep their format and an anchored run replays bit for bit.
   rounded with `Instrument.round_price`. Runs are reproducible for a seed, given the
   same sequence of external requests. Calling `tick` on a timer is the front end's job.
 
+## Performance
+
+`bench/main.exe` (core_bench) runs against `bench/scenario`: 1000 accounts each holding a
+BTC position and one maker with 100 resting orders. Run it with a short quota, since
+every fill is kept in the per-account fill history:
+
+```sh
+dune exec bench/main.exe -- -quota 3
+```
+
+`test/test_allocation.ml` pins the minor words per call, and
+`test/test_mark_to_market.ml` checks marking, funding and the order margin check against
+the original sort-every-account implementation with `Base_quickcheck`.
+
+- **Step** marks only accounts with an open position, kept in a map sorted by account id
+  (`Clearinghouse` adds an account on its first open position and prunes flat ones on the
+  next pass), instead of sorting every account. Each account's `equity - maintenance` is
+  one pass over `Account_state.position_list`, and the mark is read once per symbol per
+  pass.
+- **Submit** checks margin in one pass over the positions, sums reserved margin from the
+  owner index without building order lists, takes the book closure `local_`, reuses one
+  trade id source and settles through `Clearinghouse.settle_fill_u`, which returns the
+  two settlements as an unboxed pair.
+
+Measured on arm64 (CI is amd64), time noisy within 10 to 20%; words are exact:
+
+| Case | Build | Before | After |
+| --- | --- | --- | --- |
+| step, 1000 accounts | dev | 1770 us, 77831 w | 159 us, 20 w |
+| | release | 388 us, 77831 w | 73 us, 20 w |
+| | release `-O3` | 371 us, 77827 w | 51 us, 16 w |
+| IOC buy + sell, 2 fills | dev | 5.2 us, 565 w | 3.9 us, 459 w |
+| | release | 3.1 us, 551 w | 2.7 us, 445 w |
+| | release `-O3` | 6.2 us, 431 w | 2.5 us, 349 w |
+| submit + cancel | dev | 1.34 us, 359 w | 0.73 us, 336 w |
+| | release | 0.73 us, 352 w | 0.62 us, 328 w |
+| | release `-O3` | 0.67 us, 281 w | 0.64 us, 266 w |
+| maker submit + cancel, 100 resting | dev | 22.2 us, 3160 w | 10.5 us, 937 w |
+| | release | 13.4 us, 3153 w | 10.9 us, 929 w |
+| | release `-O3` | 10.7 us, 3082 w | 9.3 us, 867 w |
+
+The remaining submit words are mostly its outputs: events, settlements, executions and
+the fill history.
+
 ## Tests
 
 `dune test` runs expect tests (instrument rules, fees, PnL, liquidation, funding,
