@@ -24,22 +24,26 @@ let%expect_test "minor words per call" =
     ; "submit IOC buy+sell", Scenario.match_round_trip ex, [ 442; 456 ]
     ; "submit+cancel", Scenario.place_and_cancel ex, [ 325; 333 ]
     ; "maker submit+cancel", Scenario.maker_place_and_cancel ex, [ 926; 934 ]
+    ; ( "quoter submit+cancel"
+      , Scenario.quoter_place_and_cancel (Scenario.create_quoter ())
+      , [ 3372 ] )
     ]
     ~f:(fun (name, f, pinned) ->
       let words = words_per_run f in
       if List.mem pinned words ~equal:Int.equal
-      then printf "%-20s pinned\n" name
+      then printf "%-21s pinned\n" name
       else
         printf
-          "%-20s %d (pinned %s)\n"
+          "%-21s %d (pinned %s)\n"
           name
           words
           (Sexp.to_string [%sexp (pinned : int list)]));
   [%expect
     {|
-    step                 pinned
-    submit IOC buy+sell  pinned
-    submit+cancel        pinned
-    maker submit+cancel  pinned
+    step                  pinned
+    submit IOC buy+sell   pinned
+    submit+cancel         pinned
+    maker submit+cancel   pinned
+    quoter submit+cancel  pinned
     |}]
 ;;
