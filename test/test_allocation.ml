@@ -27,6 +27,6 @@ let%expect_test "minor words per call" =
     {|
     step                 77828
     submit IOC buy+sell  562
-    submit+cancel        364
+    submit+cancel        356
     |}]
 ;;
