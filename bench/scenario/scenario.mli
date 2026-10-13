@@ -26,3 +26,11 @@ val place_and_cancel : Exchange.t -> unit -> unit
 
 (** The same for the maker, whose margin check walks its [n_resting] resting orders. *)
 val maker_place_and_cancel : Exchange.t -> unit -> unit
+
+val n_quoter_orders : int
+
+(** A separate exchange where one account quotes [n_quoter_orders] resting bids. *)
+val create_quoter : unit -> Exchange.t
+
+(** [place_and_cancel] for that account, on an exchange from [create_quoter]. *)
+val quoter_place_and_cancel : Exchange.t -> unit -> unit

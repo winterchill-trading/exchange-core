@@ -8,6 +8,8 @@ let btc = Symbol.of_string "BTC"
 let addr n = Account.of_string (sprintf "0x%040x" n)
 let maker = addr 0
 let taker = addr (n_accounts + 1)
+let quoter = addr (n_accounts + 2)
+let n_quoter_orders = 500
 let best_bid = 49_999
 let best_ask = 50_001
 let px n = Price.of_int n
@@ -43,6 +45,18 @@ let create () =
   ex
 ;;
 
+let create_quoter () =
+  let ex = Exchange.create () in
+  Exchange.set_mark ex btc (px 50_000);
+  Exchange.deposit ex quoter (Usd.of_int 10_000_000);
+  for i = 1 to n_quoter_orders do
+    let offset = Price.of_string (sprintf "%d.%d" (i / 10) (i % 10)) in
+    place_exn ex quoter (limit Buy (Price.( - ) (px 45_000) offset) min_size)
+  done;
+  ignore (Exchange.drain_events ex : Event.t list);
+  ex
+;;
+
 let step ex () = Exchange.step ex ~now:(Exchange.now ex + 1)
 
 let match_round_trip ex () =
@@ -63,3 +77,4 @@ let place_and_cancel_as account ex () =
 
 let place_and_cancel = place_and_cancel_as taker
 let maker_place_and_cancel = place_and_cancel_as maker
+let quoter_place_and_cancel = place_and_cancel_as quoter
