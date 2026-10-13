@@ -140,8 +140,16 @@ let position_margin t account ~mark (p : Position.t) =
   Usd.div_int (abs_notional ~mark p) (leverage t account p.symbol)
 ;;
 
+(* Maintenance margin of a position of absolute [notional]: half the initial margin at max
+   leverage, or by margin tier. *)
+let maintenance_of (i : Instrument.t) notional =
+  match i.margin_tiers with
+  | [] -> Usd.div_int notional (2 * i.max_leverage)
+  | tiers -> Margin_tier.maintenance tiers ~notional
+;;
+
 let position_maintenance t ~mark (p : Position.t) =
-  Usd.div_int (abs_notional ~mark p) (2 * max_leverage t p.symbol)
+  maintenance_of (instrument t p.symbol) (abs_notional ~mark p)
 ;;
 
 let margin_used t account ~mark =
@@ -316,9 +324,9 @@ let rec maintenance_excess_loop t ~mark acc = function
         let px = pass_mark t ~mark p in
         Usd.( - )
           (Usd.( + ) acc (Position.unrealized_pnl p ~mark:px))
-          (Usd.div_int
-             (Usd.abs (Position.notional p ~mark:px))
-             (2 * (market t p.symbol).instrument.max_leverage)))
+          (maintenance_of
+             (market t p.symbol).instrument
+             (Usd.abs (Position.notional p ~mark:px))))
     in
     maintenance_excess_loop t ~mark acc rest
 ;;
@@ -411,7 +419,12 @@ let liquidation_px t ~mark ~equity ~maintenance (p : Position.t) =
   let side = if Size.is_positive p.size then 1. else -1. in
   let mark_px = Price.to_float (mark_of ~mark p) in
   let size = Float.abs (Size.to_float p.size) in
-  let l = 1. /. Float.of_int (2 * max_leverage t p.symbol) in
+  let maintenance_leverage =
+    Instrument.max_leverage_at
+      (instrument t p.symbol)
+      ~notional:(Usd.abs (Position.notional p ~mark:(mark_of ~mark p)))
+  in
+  let l = 1. /. Float.of_int (2 * maintenance_leverage) in
   let margin_available = Usd.to_float equity -. Usd.to_float maintenance in
   let liq = mark_px -. (side *. margin_available /. size /. (1. -. (l *. side))) in
   (* A small short against a large balance can put the estimate beyond what a [Price] can

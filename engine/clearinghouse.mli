@@ -4,7 +4,8 @@
     - equity = balance + unrealised PnL at mark over all positions;
     - initial margin of a position = [|size| * mark / leverage], where leverage is the
       account's per-instrument setting (default [min default_leverage max_leverage]);
-    - maintenance margin = [|size| * mark / (2 * max_leverage)];
+    - maintenance margin = [|size| * mark / (2 * max_leverage)], or by the instrument's
+      margin tiers ({!Exchange_core.Margin_tier.maintenance}) when it has some;
     - an account whose equity falls below its maintenance margin is liquidated by closing
       all of its positions at mark (no liquidator, no backstop vault).
 
