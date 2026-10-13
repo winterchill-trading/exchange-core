@@ -74,6 +74,8 @@ type t =
   ; reserves : Reserve.t Account.Table.t
   ; fills : Execution.t list Account.Table.t (** newest first *)
   ; events : Event.Numbered.t Queue.t
+  ; triggers : Trigger_order.t Order_id.Table.t (** trigger orders waiting for the mark *)
+  ; trigger_events : Trigger_event.t Queue.t
   ; mutable next_seq : int
   ; mutable recorders : (Input.t -> unit) list (** oldest first *)
   ; mutable time : int
@@ -105,6 +107,8 @@ let create ?(config = Config.default) ?(self_trade = Order_book.Stp.default) () 
   ; reserves = Account.Table.create ()
   ; fills = Account.Table.create ()
   ; events = Queue.create ()
+  ; triggers = Order_id.Table.create ()
+  ; trigger_events = Queue.create ()
   ; next_seq = 1
   ; recorders = []
   ; time = 0
@@ -126,6 +130,12 @@ let emit t event =
   t.next_seq <- t.next_seq + 1
 ;;
 
+let emit_trigger t (order : Trigger_order.t) kind =
+  Queue.enqueue
+    t.trigger_events
+    { Trigger_event.order; kind; time = t.time; before_seq = t.next_seq }
+;;
+
 let record_inputs t ~f = t.recorders <- t.recorders @ [ f ]
 
 (* Reports a request that has been performed to the input recorders. *)
@@ -135,6 +145,12 @@ let next_event_seq t = t.next_seq
 let drain_numbered_events t =
   let events = Queue.to_list t.events in
   Queue.clear t.events;
+  events
+;;
+
+let drain_trigger_events t =
+  let events = Queue.to_list t.trigger_events in
+  Queue.clear t.trigger_events;
   events
 ;;
 
@@ -585,33 +601,34 @@ let place_market
              ()))
 ;;
 
-let place_internal t account (req : Order_request.t) =
+let place_with_id t account (req : Order_request.t) ~order_id : Order_status.t =
+  match instrument t req.symbol with
+  | None ->
+    emit_reject
+      t
+      account
+      ~symbol:req.symbol
+      ~order_id
+      ?client_order_id:req.client_order_id
+      Unknown_symbol
+  | Some instrument ->
+    (match req.order_type, req.px with
+     | Limit tif, Some px -> place_limit t account instrument req ~order_id ~px ~tif
+     | Limit _, None ->
+       emit_reject
+         t
+         account
+         ~symbol:req.symbol
+         ~order_id
+         ?client_order_id:req.client_order_id
+         Invalid_price
+     | Market { slippage_bps }, _ ->
+       place_market t account instrument req ~order_id ~slippage_bps)
+;;
+
+let place_internal t account req =
   let order_id = next_order_id t in
-  let status : Order_status.t =
-    match instrument t req.symbol with
-    | None ->
-      emit_reject
-        t
-        account
-        ~symbol:req.symbol
-        ~order_id
-        ?client_order_id:req.client_order_id
-        Unknown_symbol
-    | Some instrument ->
-      (match req.order_type, req.px with
-       | Limit tif, Some px -> place_limit t account instrument req ~order_id ~px ~tif
-       | Limit _, None ->
-         emit_reject
-           t
-           account
-           ~symbol:req.symbol
-           ~order_id
-           ?client_order_id:req.client_order_id
-           Invalid_price
-       | Market { slippage_bps }, _ ->
-         place_market t account instrument req ~order_id ~slippage_bps)
-  in
-  order_id, status
+  order_id, place_with_id t account req ~order_id
 ;;
 
 let place_with_order_id t account request =
@@ -628,6 +645,121 @@ let reject ?symbol ?order_id ?client_order_id t account reason =
   status
 ;;
 
+(* Trigger orders *)
+
+let remove_trigger t (o : Trigger_order.t) =
+  Hashtbl.remove t.triggers o.order_id;
+  Option.iter o.request.client_order_id ~f:(fun cid ->
+    Option.iter (Hashtbl.find t.client_ids o.account) ~f:(fun tbl ->
+      match Hashtbl.find tbl cid with
+      | Some oid when Order_id.equal oid o.order_id -> Hashtbl.remove tbl cid
+      | Some _ | None -> ()))
+;;
+
+let cancel_trigger t (o : Trigger_order.t) ~reason =
+  remove_trigger t o;
+  emit_trigger t o (Cancelled reason)
+;;
+
+let find_trigger t account oid =
+  match Hashtbl.find t.triggers oid with
+  | Some o when Account.equal o.account account -> Some o
+  | Some _ | None -> None
+;;
+
+let trigger_orders t account =
+  Hashtbl.data t.triggers
+  |> List.filter ~f:(fun (o : Trigger_order.t) -> Account.equal o.account account)
+  |> List.sort ~compare:(fun (a : Trigger_order.t) b ->
+    Order_id.compare b.order_id a.order_id)
+;;
+
+(* Fires every trigger order the current marks have reached, in order id order. Marks are
+   read before any of them is placed, so one pass fires what was due when it started. *)
+let fire_triggers t =
+  if not (Hashtbl.is_empty t.triggers)
+  then
+    Hashtbl.data t.triggers
+    |> List.filter ~f:(fun (o : Trigger_order.t) ->
+      match mark t o.request.symbol with
+      | None -> false
+      | Some mark -> Trigger.fires o.trigger ~side:o.request.side ~mark)
+    |> List.sort ~compare:(fun (a : Trigger_order.t) b ->
+      Order_id.compare a.order_id b.order_id)
+    |> List.iter ~f:(fun (o : Trigger_order.t) ->
+      remove_trigger t o;
+      emit_trigger t o Triggered;
+      ignore (place_with_id t o.account o.request ~order_id:o.order_id : Order_status.t))
+;;
+
+let trigger_checks t account (instrument : Instrument.t) (req : Order_request.t) trigger
+  : (unit, Reject_reason.t) Result.t
+  =
+  let open Result.Let_syntax in
+  let { Trigger.trigger_px; kind = _ } = trigger in
+  let%bind px =
+    match req.order_type, req.px with
+    | Limit _, Some px -> Ok px
+    | Limit _, None -> Error Reject_reason.Invalid_price
+    | Market _, _ -> Ok trigger_px
+  in
+  let%bind () =
+    if Instrument.valid_price instrument trigger_px
+       && Instrument.valid_price instrument px
+    then Ok ()
+    else Error Reject_reason.Invalid_price
+  in
+  let%bind () =
+    if Instrument.valid_size instrument req.size
+    then Ok ()
+    else Error Reject_reason.Invalid_size
+  in
+  let%bind () =
+    match req.client_order_id with
+    | Some cid when Hashtbl.mem (client_id_index t account) cid ->
+      Error Reject_reason.Duplicate_client_order_id
+    | _ -> Ok ()
+  in
+  if req.reduce_only || Usd.( >= ) (Notional.mul px req.size) t.config.min_order_value
+  then Ok ()
+  else Error (Reject_reason.Below_min_value { min = t.config.min_order_value })
+;;
+
+let place_trigger_with_id t account (req : Order_request.t) trigger ~order_id
+  : Order_status.t
+  =
+  let cid = req.client_order_id in
+  match instrument t req.symbol with
+  | None ->
+    emit_reject t account ~symbol:req.symbol ~order_id ?client_order_id:cid Unknown_symbol
+  | Some instrument ->
+    (match trigger_checks t account instrument req trigger with
+     | Error reason ->
+       emit_reject t account ~symbol:req.symbol ~order_id ?client_order_id:cid reason
+     | Ok () ->
+       let o =
+         { Trigger_order.account; order_id; request = req; trigger; timestamp = t.time }
+       in
+       Hashtbl.set t.triggers ~key:order_id ~data:o;
+       Option.iter cid ~f:(fun cid ->
+         Hashtbl.set (client_id_index t account) ~key:cid ~data:order_id);
+       emit_trigger t o Placed;
+       (* A trigger the mark has already reached fires at once. *)
+       fire_triggers t;
+       Resting { order_id; client_order_id = cid })
+;;
+
+let place_trigger_internal t account req trigger =
+  let order_id = next_order_id t in
+  order_id, place_trigger_with_id t account req trigger ~order_id
+;;
+
+let place_trigger t account request trigger =
+  let result = place_trigger_internal t account request trigger in
+  record t (Place_trigger { account; request; trigger });
+  result
+;;
+
 let owned_symbol t account oid =
   Option.bind (Hashtbl.find t.owner_orders account) ~f:(fun tbl -> Hashtbl.find tbl oid)
 ;;
@@ -636,7 +768,12 @@ let cancel_oid t account ~symbol ~oid ~reason : Cancel_status.t =
   match owned_symbol t account oid with
   | Some owned when Symbol.equal owned symbol ->
     if remove_resting t ~symbol oid ~reason then Cancelled else Not_found
-  | _ -> Not_found
+  | Some _ | None ->
+    (match find_trigger t account oid with
+     | Some o when Symbol.equal o.request.symbol symbol ->
+       cancel_trigger t o ~reason;
+       Cancelled
+     | Some _ | None -> Not_found)
 ;;
 
 let cancel t account ~symbol order_id =
@@ -659,7 +796,8 @@ let cancel_by_client_order_id t account ~symbol client_order_id : Cancel_status.
   status
 ;;
 
-let modify_internal t account (target : Target.t) (req : Order_request.t) : Order_status.t
+let modify_internal ?trigger t account (target : Target.t) (req : Order_request.t)
+  : Order_status.t
   =
   let oid =
     match target with
@@ -671,17 +809,27 @@ let modify_internal t account (target : Target.t) (req : Order_request.t) : Orde
     | None -> false
     | Some oid ->
       (match owned_symbol t account oid with
-       | None -> false
-       | Some symbol -> remove_resting t ~symbol oid ~reason:Modified)
+       | Some symbol -> remove_resting t ~symbol oid ~reason:Modified
+       | None ->
+         (match find_trigger t account oid with
+          | None -> false
+          | Some o ->
+            cancel_trigger t o ~reason:Modified;
+            true))
   in
-  if cancelled
-  then snd (place_internal t account req)
-  else emit_reject t account ?client_order_id:req.client_order_id Order_not_found
+  if not cancelled
+  then emit_reject t account ?client_order_id:req.client_order_id Order_not_found
+  else (
+    match trigger with
+    | None -> snd (place_internal t account req)
+    | Some trigger -> snd (place_trigger_internal t account req trigger))
 ;;
 
-let modify t account target request =
-  let status = modify_internal t account target request in
-  record t (Modify { account; target; request });
+let modify ?trigger t account target request =
+  let status = modify_internal ?trigger t account target request in
+  (match trigger with
+   | None -> record t (Modify { account; target; request })
+   | Some trigger -> record t (Modify_trigger { account; target; request; trigger }));
   status
 ;;
 
@@ -724,12 +872,17 @@ let liquidate t =
   |> List.dedup_and_sort ~compare:Account.compare
   |> List.iter ~f:(fun account ->
     List.iter (resting_orders_of t account) ~f:(fun (symbol, o) ->
-      ignore (remove_resting t ~symbol o.oid ~reason:Liquidated : bool)))
+      ignore (remove_resting t ~symbol o.oid ~reason:Liquidated : bool));
+    if not (Hashtbl.is_empty t.triggers)
+    then
+      List.rev (trigger_orders t account)
+      |> List.iter ~f:(cancel_trigger t ~reason:Liquidated))
 ;;
 
 let set_mark t symbol px =
   Hashtbl.set t.marks ~key:symbol ~data:px;
   liquidate t;
+  fire_triggers t;
   record t (Set_mark { symbol; px })
 ;;
 
@@ -765,6 +918,7 @@ let step t ~now =
   done;
   t.time <- now;
   liquidate t;
+  fire_triggers t;
   record t (Step { now })
 ;;
 
@@ -785,4 +939,8 @@ let apply t (input : Input.t) =
   | Set_mark { symbol; px } -> set_mark t symbol px
   | Set_funding_rate { symbol; rate } -> set_funding_rate t symbol rate
   | Step { now } -> step t ~now
+  | Place_trigger { account; request; trigger } ->
+    ignore (place_trigger t account request trigger : Order_id.t * Order_status.t)
+  | Modify_trigger { account; target; request; trigger } ->
+    ignore (modify ~trigger t account target request : Order_status.t)
 ;;

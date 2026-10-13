@@ -99,11 +99,53 @@ val cancel_by_client_order_id
 
 module Target = Target
 
-(** Cancels the target order (in any symbol) and places the replacement with a new order
-    id, losing time priority. If the target is not a resting order of the account the
-    result is [Rejected Order_not_found]; if the replacement is rejected the original
+(** Cancels the target order (in any symbol, a resting or a trigger order) and places the
+    replacement with a new order id, losing time priority; with [trigger] the replacement
+    is a trigger order ({!place_trigger}). If the target is not an order of the account
+    the result is [Rejected Order_not_found]; if the replacement is rejected the original
     stays cancelled. *)
-val modify : t -> Account.t -> Target.t -> Order_request.t -> Order_status.t
+val modify
+  :  ?trigger:Trigger.t
+  -> t
+  -> Account.t
+  -> Target.t
+  -> Order_request.t
+  -> Order_status.t
+
+(** {2 Trigger orders}
+
+    A trigger order waits off the book, holding no margin, until the mark price ({!mark})
+    reaches its trigger price in the direction {!Exchange_core.Trigger} gives for its side
+    and kind. Then the request is placed as an ordinary order under the trigger order's
+    id: a limit request at its limit price and time in force, a market request as a market
+    order (its [slippage_bps] through the best opposite price), with every check of
+    {!place}, margin included, done at that moment.
+
+    Marks are compared after {!set_mark} and {!step} (after their liquidations) and when a
+    trigger order is placed, so one whose price the mark has already reached fires at
+    once. Trigger orders that fire in the same call are placed in order id order.
+
+    {!cancel}, {!cancel_by_client_order_id} and {!modify} reach trigger orders by id or
+    client order id; a liquidated account's trigger orders are cancelled with reason
+    [Liquidated]. Trigger orders produce {!Trigger_event.t}s ({!drain_trigger_events});
+    the order placed when one fires produces ordinary {!Event.t}s. *)
+
+(** Checks the request (known symbol, valid trigger and limit prices, size, client order
+    id not in use, minimum value at the limit price, or at the trigger price for a market
+    request, unless reduce-only) and adds it to the trigger orders: [Resting] with a fresh
+    order id, or [Rejected] with an [Order_rejected] event carrying that id. *)
+val place_trigger
+  :  t
+  -> Account.t
+  -> Order_request.t
+  -> Trigger.t
+  -> Order_id.t * Order_status.t
+
+(** The account's trigger orders, newest first. *)
+val trigger_orders : t -> Account.t -> Trigger_order.t list
+
+(** Returns the trigger events since the previous call, oldest first, and forgets them. *)
+val drain_trigger_events : t -> Trigger_event.t list
 
 (** {2 Views} *)
 
@@ -146,9 +188,9 @@ val step : t -> now:int -> unit
 
     Every call above that changes the exchange ([deposit], [set_leverage], [place],
     [place_with_order_id], [reject], [cancel], [cancel_by_client_order_id], [modify],
-    [set_mark], [set_funding_rate], [step]) is reported to the input recorders as an
-    {!Input.t} once it has been performed. Changes made directly through {!clearinghouse}
-    or {!book} are not. *)
+    [place_trigger], [set_mark], [set_funding_rate], [step]) is reported to the input
+    recorders as an {!Input.t} once it has been performed. Changes made directly through
+    {!clearinghouse} or {!book} are not. *)
 
 (** Adds a recorder, called after every mutating call with the request it performed.
     Recorders are called in the order they were added. *)
