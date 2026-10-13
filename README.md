@@ -61,6 +61,7 @@ caches the built opam switch between runs.
 | `Order_status` | `Resting` / `Filled { total; avg_px }` / `Rejected of Reject_reason.t` |
 | `Reject_reason` | Why an order was rejected (invalid size or price, margin, self-trade, ...) |
 | `Cancel_status` | `Cancelled` / `Not_found` |
+| `Trigger` | Trigger price and kind (take-profit or stop-loss) of a trigger order; which way the mark has to move for each side |
 | `Open_order` | A resting order as reported to its owner |
 | `L2` | Aggregated book snapshot, best first |
 | `Position_view`, `Account_view` | Positions and cross-margin summary at mark: balance, equity, margin used, maintenance, available |
@@ -79,6 +80,7 @@ protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs
 | `Clearinghouse` | All accounts: fill settlement, per-instrument fees, initial and maintenance margin, liquidation, funding, `Account_view` |
 | `Execution` | One account's side of a fill (fill plus settlement), as kept in its history |
 | `Event` | Log entries: order accepted/rejected/filled/cancelled, fill, liquidation, funding; `Event.Numbered` adds the sequence number |
+| `Trigger_order`, `Trigger_event` | A trigger order waiting for the mark, and what happens to it (placed, triggered, cancelled), in a log of its own |
 | `Target` | The order a modify replaces: by order id or client order id (also `Exchange.Target`) |
 | `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place (`place_with_order_id` also returns the assigned id), cancel, modify, views, `set_mark`, `funding_rate` / `set_funding_rate`, `step`, `drain_events` / `drain_numbered_events`, `record_inputs`, `apply` |
 | `Input` | Every mutating request as a value, with a `bin_prot` encoding |
@@ -225,6 +227,16 @@ keep their format and an anchored run replays bit for bit.
   `step`: every position pays `size * mark * rate`, so longs pay shorts when the rate is
   positive. The rate is per instrument (`set_funding_rate`, read back with
   `funding_rate`), default 0.00125%; it is not derived from a premium index.
+- **Trigger orders** (`place_trigger`) wait off the book, holding no margin, until the
+  mark reaches the trigger price: a sell stop-loss or a buy take-profit fires at or below
+  it, a buy stop-loss or a sell take-profit at or above it. The request is then placed
+  as an ordinary limit or market order under the trigger order's id, with every check
+  done at that moment. Marks are compared after `set_mark` and `step` and when the
+  order is placed, so a trigger the mark has already reached fires at once. Cancel,
+  cancel by client order id and modify (`?trigger` for a trigger replacement) reach
+  trigger orders; liquidation cancels them. Their events come from
+  `drain_trigger_events`, ordered against the main log by `before_seq`, so front ends
+  that match every `Event.t` constructor are unaffected.
 - **Modify** cancels the target and places the replacement with a new order id (losing
   priority). If the replacement is rejected the original stays cancelled.
 - **Fixed point.** `Price`, `Size` and `Usd` count units of `10^-8` in an `int`.
