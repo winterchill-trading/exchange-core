@@ -13,5 +13,8 @@ let () =
            ~name:"submit IOC buy+sell (2 fills)"
            (Scenario.match_round_trip ex)
        ; Bench.Test.create ~name:"submit+cancel resting" (Scenario.place_and_cancel ex)
+       ; Bench.Test.create
+           ~name:"maker submit+cancel (100 resting)"
+           (Scenario.maker_place_and_cancel ex)
        ])
 ;;
