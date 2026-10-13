@@ -80,6 +80,8 @@ protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs
 | `Clearinghouse` | All accounts: fill settlement, per-instrument fees, initial and maintenance margin, liquidation, funding, `Account_view` |
 | `Execution` | One account's side of a fill (fill plus settlement), as kept in its history |
 | `Event` | Log entries: order accepted/rejected/filled/cancelled, fill, liquidation, funding; `Event.Numbered` adds the sequence number |
+| `Price_index` | Oracle price and Hyperliquid's mark: median of oracle plus a 150 s average of the book's premium, the book's own prices and their 30 s average |
+| `Premium_funding` | Impact prices, the premium over the oracle, and the clamped, capped funding rate from its average |
 | `Trigger_order`, `Trigger_event` | A trigger order waiting for the mark, and what happens to it (placed, triggered, cancelled), in a log of its own |
 | `Target` | The order a modify replaces: by order id or client order id (also `Exchange.Target`) |
 | `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place (`place_with_order_id` also returns the assigned id), cancel, modify, views, `set_mark`, `funding_rate` / `set_funding_rate`, `step`, `drain_events` / `drain_numbered_events`, `record_inputs`, `apply` |
@@ -219,6 +221,17 @@ keep their format and an anchored run replays bit for bit.
 - **Fees** come from each instrument's `Fee_schedule` (default taker 3.5 bps, maker
   1 bp) and are always charged.
 - **Mark price** is the last `set_mark`, else the last trade price, else the book mid.
+- **Oracle price** (`set_oracle`, optional): an external index price, as Hyperliquid's
+  validators publish every 3 seconds. Each update sets the mark to the median of the
+  oracle plus the 150 s moving average of `mid - oracle`, the median of best bid, best
+  ask and last trade, and (since the third, external input is missing) the 30 s average
+  of that median, rounded to a valid price (`Price_index`). From the first oracle on,
+  `step` samples the premium of the impact prices (average fill of 20,000 USDC for BTC
+  and ETH, 6,000 otherwise) over the oracle every 5 s, and funding charges
+  `size * oracle * rate` with the rate `P + clamp (0.01% - P, ±0.05%)` per 8 hours, one
+  eighth per hour, capped at 4% an hour (`Premium_funding`, set with
+  `Exchange.create ~premium_funding`). `Market_sim.Config.oracle_interval` publishes the
+  reference walk as the oracle instead of the mark.
 - **Liquidation.** `set_mark` and `step` close every position of an account whose equity
   is below maintenance margin at mark and cancel its resting orders. There is no
   liquidator or backstop: the closed size leaves open interest, and losses beyond the
@@ -226,7 +239,7 @@ keep their format and an anchored run replays bit for bit.
 - **Funding** is charged at each multiple of the funding interval (1 hour) crossed by
   `step`: every position pays `size * mark * rate`, so longs pay shorts when the rate is
   positive. The rate is per instrument (`set_funding_rate`, read back with
-  `funding_rate`), default 0.00125%; it is not derived from a premium index.
+  `funding_rate`), default 0.00125%, unless the symbol has an oracle price (above).
 - **Trigger orders** (`place_trigger`) wait off the book, holding no margin, until the
   mark reaches the trigger price: a sell stop-loss or a buy take-profit fires at or below
   it, a buy stop-loss or a sell take-profit at or above it. The request is then placed
