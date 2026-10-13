@@ -200,12 +200,6 @@ let deposit t account usd =
   record t (Deposit { account; usd })
 ;;
 
-let set_leverage t account symbol leverage =
-  let result = Clearinghouse.set_leverage t.clearinghouse account symbol leverage in
-  record t (Set_leverage { account; symbol; leverage });
-  result
-;;
-
 let mark t symbol =
   match Hashtbl.find t.marks symbol with
   | Some _ as mark -> mark
@@ -216,6 +210,40 @@ let mark t symbol =
 ;;
 
 let mark_fn t : Clearinghouse.mark = mark t
+
+(* With margin tiers, the leverage may not exceed the tier of the current position. *)
+let check_tier t account symbol leverage =
+  match instrument t symbol with
+  | Some ({ margin_tiers = _ :: _; _ } as i) ->
+    let notional =
+      Option.bind (Clearinghouse.find_account t.clearinghouse account) ~f:(fun a ->
+        Account_state.position a symbol)
+      |> Option.value_map ~default:Usd.zero ~f:(fun p ->
+        let px = Option.value (mark t symbol) ~default:p.entry_px in
+        Usd.abs (Position.notional p ~mark:px))
+    in
+    let max = Instrument.max_leverage_at i ~notional in
+    if leverage > max
+    then
+      Or_error.error_s
+        [%message
+          "Leverage above the margin tier of the position"
+            (symbol : Symbol.t)
+            (leverage : int)
+            ~max_leverage:(max : int)
+            (notional : Usd.t)]
+    else Ok ()
+  | Some _ | None -> Ok ()
+;;
+
+let set_leverage t account symbol leverage =
+  let result =
+    Or_error.bind (check_tier t account symbol leverage) ~f:(fun () ->
+      Clearinghouse.set_leverage t.clearinghouse account symbol leverage)
+  in
+  record t (Set_leverage { account; symbol; leverage });
+  result
+;;
 
 (* Order indexes *)
 
