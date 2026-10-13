@@ -7,7 +7,8 @@
 
     The binary encoding ([bin_prot]) does not depend on the in-memory representation of
     the fixed-point and id types: prices, sizes and amounts are written as their integer
-    units, ids and names as strings or integers. *)
+    units, ids and names as strings or integers. Constructors are only ever appended to
+    the encoding, so journals written before a constructor existed still load. *)
 
 open! Core
 open! Exchange_core
@@ -57,6 +58,17 @@ type t =
       ; rate : float
       }
   | Step of { now : int }
+  | Place_trigger of
+      { account : Account.t
+      ; request : Order_request.t
+      ; trigger : Trigger.t
+      }
+  | Modify_trigger of
+      { account : Account.t
+      ; target : Target.t
+      ; request : Order_request.t
+      ; trigger : Trigger.t
+      } (** a modify whose replacement is a trigger order *)
 [@@deriving sexp_of, compare, equal]
 
 include Binable.S with type t := t

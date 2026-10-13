@@ -46,6 +46,17 @@ type t =
       ; rate : float
       }
   | Step of { now : int }
+  | Place_trigger of
+      { account : Account.t
+      ; request : Order_request.t
+      ; trigger : Trigger.t
+      }
+  | Modify_trigger of
+      { account : Account.t
+      ; target : Target.t
+      ; request : Order_request.t
+      ; trigger : Trigger.t
+      }
 [@@deriving sexp_of, compare, equal]
 
 (* The on-disk shape. Primitive types only, so the encoding is stable whatever the
@@ -98,6 +109,17 @@ module Wire = struct
     | Client_order_id of string
   [@@deriving bin_io]
 
+  type trigger_kind =
+    | Take_profit
+    | Stop_loss
+  [@@deriving bin_io]
+
+  type trigger =
+    { trigger_px : int
+    ; kind : trigger_kind
+    }
+  [@@deriving bin_io]
+
   type t =
     | Deposit of string * int
     | Set_leverage of string * string * int
@@ -109,6 +131,8 @@ module Wire = struct
     | Set_mark of string * int
     | Set_funding_rate of string * float
     | Step of int
+    | Place_trigger of string * request * trigger
+    | Modify_trigger of string * target * request * trigger
   [@@deriving bin_io]
 end
 
@@ -208,6 +232,24 @@ let target_of_wire : Wire.target -> Target.t = function
   | Client_order_id cid -> Client_order_id (Client_order_id.of_string cid)
 ;;
 
+let trigger_to_wire ({ trigger_px; kind } : Trigger.t) : Wire.trigger =
+  { trigger_px = Price.to_units trigger_px
+  ; kind =
+      (match kind with
+       | Take_profit -> Take_profit
+       | Stop_loss -> Stop_loss)
+  }
+;;
+
+let trigger_of_wire ({ trigger_px; kind } : Wire.trigger) : Trigger.t =
+  { trigger_px = Price.of_units trigger_px
+  ; kind =
+      (match kind with
+       | Take_profit -> Take_profit
+       | Stop_loss -> Stop_loss)
+  }
+;;
+
 let to_wire : t -> Wire.t =
   let a = Account.to_string in
   let s = Symbol.to_string in
@@ -233,6 +275,11 @@ let to_wire : t -> Wire.t =
   | Set_mark { symbol; px } -> Set_mark (s symbol, Price.to_units px)
   | Set_funding_rate { symbol; rate } -> Set_funding_rate (s symbol, rate)
   | Step { now } -> Step now
+  | Place_trigger { account; request; trigger } ->
+    Place_trigger (a account, request_to_wire request, trigger_to_wire trigger)
+  | Modify_trigger { account; target; request; trigger } ->
+    Modify_trigger
+      (a account, target_to_wire target, request_to_wire request, trigger_to_wire trigger)
 ;;
 
 let of_wire : Wire.t -> t =
@@ -270,6 +317,19 @@ let of_wire : Wire.t -> t =
   | Set_mark (symbol, px) -> Set_mark { symbol = s symbol; px = Price.of_units px }
   | Set_funding_rate (symbol, rate) -> Set_funding_rate { symbol = s symbol; rate }
   | Step now -> Step { now }
+  | Place_trigger (account, request, trigger) ->
+    Place_trigger
+      { account = a account
+      ; request = request_of_wire request
+      ; trigger = trigger_of_wire trigger
+      }
+  | Modify_trigger (account, target, request, trigger) ->
+    Modify_trigger
+      { account = a account
+      ; target = target_of_wire target
+      ; request = request_of_wire request
+      ; trigger = trigger_of_wire trigger
+      }
 ;;
 
 include
