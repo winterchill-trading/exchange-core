@@ -21,6 +21,7 @@ let%expect_test "minor words per call" =
     [ "step", Scenario.step ex
     ; "submit IOC buy+sell", Scenario.match_round_trip ex
     ; "submit+cancel", Scenario.place_and_cancel ex
+    ; "maker submit+cancel", Scenario.maker_place_and_cancel ex
     ]
     ~f:(fun (name, f) -> printf "%-20s %d\n" name (words_per_run f));
   [%expect
@@ -28,5 +29,6 @@ let%expect_test "minor words per call" =
     step                 17
     submit IOC buy+sell  462
     submit+cancel        331
+    maker submit+cancel  2932
     |}]
 ;;
