@@ -107,3 +107,31 @@ let%expect_test "gaps and unknown orders are errors" =
   print_s [%sexp (Book_replay.apply replay cancelled : unit Or_error.t)];
   [%expect {| (Ok ()) |}]
 ;;
+
+let%expect_test "expired own makers leave the rebuilt book" =
+  let ex = Exchange.create ~self_trade:Expire_maker () in
+  let sim =
+    Market_sim.create { Market_sim.Config.default with seed = 5; noise_traders = 6 } ex
+  in
+  let replay = Book_replay.create ~self_trade:Expire_maker (symbols ex) in
+  let expired = ref 0 in
+  let mismatches = ref 0 in
+  for i = 1 to 500 do
+    Market_sim.tick sim;
+    Exchange.step ex ~now:(i * 100_000_000);
+    let drained = Exchange.drain_numbered_events ex in
+    List.iter drained ~f:(fun { event; _ } ->
+      match event with
+      | Order_cancelled { reason = Self_trade; _ } -> incr expired
+      | _ -> ());
+    ok_exn (Book_replay.apply_all replay drained);
+    List.iter (symbols ex) ~f:(fun symbol ->
+      let expected = Exchange.l2 ex symbol ~n_levels:1_000 in
+      let rebuilt =
+        Book_replay.l2 replay symbol ~n_levels:1_000 ~time:(Exchange.now ex)
+      in
+      if not ([%equal: L2.t option] expected rebuilt) then incr mismatches)
+  done;
+  print_s [%message "" ~expired:(!expired : int) ~mismatches:(!mismatches : int)];
+  [%expect {| ((expired 80) (mismatches 0)) |}]
+;;
