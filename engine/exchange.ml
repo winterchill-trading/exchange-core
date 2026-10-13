@@ -222,7 +222,7 @@ let reserved_margin t account =
 (* Matching results *)
 
 let record_fill t book (fill : Order_book.Fill.t) =
-  let taker, maker = Clearinghouse.settle_fill t.clearinghouse fill in
+  let #(taker, maker) = Clearinghouse.settle_fill_u t.clearinghouse fill in
   Hashtbl.add_multi t.fills ~key:fill.taker ~data:{ Execution.fill; settlement = taker };
   Hashtbl.add_multi t.fills ~key:fill.maker ~data:{ Execution.fill; settlement = maker };
   Hashtbl.set t.last_trade ~key:fill.symbol ~data:fill.px;
