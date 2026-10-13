@@ -2,11 +2,26 @@ open! Core
 
 let magic = "EXJRNL01"
 let magic_with_header = "EXJRNL02"
+let magic_with_header_v3 = "EXJRNL03"
 
 module Header = struct
-  type t = { self_trade : Order_book.Stp.t } [@@deriving sexp_of, equal]
+  type t =
+    { self_trade : Order_book.Stp.t
+    ; book_liquidation : Book_liquidation.Config.t option
+    }
+  [@@deriving sexp_of, equal]
 
-  let default = { self_trade = Order_book.Stp.default }
+  let default = { self_trade = Order_book.Stp.default; book_liquidation = None }
+
+  let create ?(self_trade = default.self_trade) ?book_liquidation () =
+    { self_trade; book_liquidation }
+  ;;
+
+  let of_exchange exchange =
+    { self_trade = Exchange.self_trade exchange
+    ; book_liquidation = Exchange.book_liquidation exchange
+    }
+  ;;
 
   (* The file encoding, kept apart from [Order_book.Stp.t]: bin_prot writes a variant as
      its constructor index, so constructors are only ever appended here. *)
@@ -18,32 +33,83 @@ module Header = struct
     [@@deriving bin_io]
 
     type t = { self_trade : stp } [@@deriving bin_io]
+
+    (* The "EXJRNL03" header: the "EXJRNL02" one plus book liquidation. *)
+    type book_liquidation =
+      { liquidator : string
+      ; partial_above : int
+      ; partial_fraction : float
+      ; cooldown_ns : int
+      ; backstop_fraction : float
+      }
+    [@@deriving bin_io]
+
+    type v3 =
+      { self_trade : stp
+      ; book_liquidation : book_liquidation option
+      }
+    [@@deriving bin_io]
   end
 
-  let to_wire { self_trade } : Wire.t =
-    { self_trade =
-        (match self_trade with
-         | Cancel_taker -> Cancel_taker
-         | Expire_maker -> Expire_maker
-         | Cancel_both -> Cancel_both)
+  let stp_to_wire : Order_book.Stp.t -> Wire.stp = function
+    | Cancel_taker -> Cancel_taker
+    | Expire_maker -> Expire_maker
+    | Cancel_both -> Cancel_both
+  ;;
+
+  let stp_of_wire : Wire.stp -> Order_book.Stp.t = function
+    | Cancel_taker -> Cancel_taker
+    | Expire_maker -> Expire_maker
+    | Cancel_both -> Cancel_both
+  ;;
+
+  let to_wire t : Wire.t = { self_trade = stp_to_wire t.self_trade }
+
+  let of_wire ({ self_trade } : Wire.t) =
+    { default with self_trade = stp_of_wire self_trade }
+  ;;
+
+  let to_wire_v3 t : Wire.v3 =
+    { self_trade = stp_to_wire t.self_trade
+    ; book_liquidation =
+        Option.map t.book_liquidation ~f:(fun (c : Book_liquidation.Config.t) ->
+          { Wire.liquidator = Exchange_core.Account.to_string c.liquidator
+          ; partial_above = Exchange_core.Usd.to_units c.partial_above
+          ; partial_fraction = c.partial_fraction
+          ; cooldown_ns = Time_ns.Span.to_int_ns c.cooldown
+          ; backstop_fraction = c.backstop_fraction
+          })
     }
   ;;
 
-  let of_wire ({ self_trade } : Wire.t) =
-    { self_trade =
-        (match self_trade with
-         | Cancel_taker -> Cancel_taker
-         | Expire_maker -> Expire_maker
-         | Cancel_both -> Cancel_both)
+  let of_wire_v3 ({ self_trade; book_liquidation } : Wire.v3) =
+    { self_trade = stp_of_wire self_trade
+    ; book_liquidation =
+        Option.map book_liquidation ~f:(fun (w : Wire.book_liquidation) ->
+          { Book_liquidation.Config.liquidator =
+              Exchange_core.Account.of_string w.liquidator
+          ; partial_above = Exchange_core.Usd.of_units w.partial_above
+          ; partial_fraction = w.partial_fraction
+          ; cooldown = Time_ns.Span.of_int_ns w.cooldown_ns
+          ; backstop_fraction = w.backstop_fraction
+          })
     }
   ;;
 
   (* A default header is not written, so such journals stay byte-identical to the
-     headerless format. *)
+     headerless format, and one without book liquidation keeps the "EXJRNL02" form. *)
   let prefix t =
     if equal t default
     then magic
-    else magic_with_header ^ Binable.to_string (module Wire) (to_wire t)
+    else if Option.is_none t.book_liquidation
+    then magic_with_header ^ Binable.to_string (module Wire) (to_wire t)
+    else
+      magic_with_header_v3
+      ^ Binable.to_string
+          (module struct
+            type t = Wire.v3 [@@deriving bin_io]
+          end)
+          (to_wire_v3 t)
   ;;
 end
 
@@ -73,6 +139,17 @@ let attach t exchange =
         "Journal.attach: the exchange's self-trade policy differs from the header"
           (self_trade : Order_book.Stp.t)
           (t.header : Header.t)];
+  let book_liquidation = Exchange.book_liquidation exchange in
+  if not
+       ([%equal: Book_liquidation.Config.t option]
+          book_liquidation
+          t.header.book_liquidation)
+  then
+    raise_s
+      [%message
+        "Journal.attach: the exchange's book liquidation differs from the header"
+          (book_liquidation : Book_liquidation.Config.t option)
+          (t.header : Header.t)];
   Exchange.record_inputs exchange ~f:(write t)
 ;;
 
@@ -100,6 +177,12 @@ let of_string_with_header s =
     then (
       match Header.Wire.bin_read_t buf ~pos_ref with
       | wire -> Ok (Header.of_wire wire)
+      | exception exn ->
+        Or_error.error_s [%message "Journal: unreadable header" (exn : exn)])
+    else if has magic_with_header_v3
+    then (
+      match Header.Wire.bin_read_v3 buf ~pos_ref with
+      | wire -> Ok (Header.of_wire_v3 wire)
       | exception exn ->
         Or_error.error_s [%message "Journal: unreadable header" (exn : exn)])
     else Or_error.error_string "Journal: missing magic string"
@@ -135,7 +218,13 @@ let load_with_header path =
 let load path = Or_error.map (load_with_header path) ~f:snd
 
 let replay ?config ?(header = Header.default) inputs =
-  let exchange = Exchange.create ?config ~self_trade:header.self_trade () in
+  let exchange =
+    Exchange.create
+      ?config
+      ~self_trade:header.self_trade
+      ?book_liquidation:header.book_liquidation
+      ()
+  in
   List.iter inputs ~f:(Exchange.apply exchange);
   exchange
 ;;

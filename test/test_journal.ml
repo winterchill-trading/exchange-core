@@ -154,7 +154,7 @@ let%expect_test "the self-trade policy travels in the header" =
   let path = "test_journal_stp.bin" in
   let self_trade : Order_book.Stp.t = Expire_maker in
   let original = Exchange.create ~self_trade () in
-  let journal = Journal.create ~header:{ self_trade } path in
+  let journal = Journal.create ~header:(Journal.Header.create ~self_trade ()) path in
   Journal.attach journal original;
   let events = run original in
   Journal.close journal;
@@ -180,7 +180,7 @@ let%expect_test "the self-trade policy travels in the header" =
         ~without_header:(identical (replay ()) : bool)];
   [%expect
     {|
-    ((magic EXJRNL02) (header ((self_trade Expire_maker)))
+    ((magic EXJRNL02) (header ((self_trade Expire_maker) (book_liquidation ())))
      (self_trade_cancels 67) (with_header true) (without_header false))
     |}]
 ;;
@@ -197,7 +197,9 @@ let%expect_test "default headers keep the original format" =
         ~magic:(String.prefix plain 8 : string)
         ~expire_maker:
           (Journal.of_string_with_header
-             (Journal.to_string ~header:{ self_trade = Expire_maker } inputs)
+             (Journal.to_string
+                ~header:(Journal.Header.create ~self_trade:Expire_maker ())
+                inputs)
            : (Journal.Header.t * Input.t list) Or_error.t)
         ~bad_header:
           ((* Only the message: bin_prot's exception names the source path, which depends
@@ -212,11 +214,14 @@ let%expect_test "default headers keep the original format" =
   [%expect
     {|
     ((same_bytes true) (magic EXJRNL01)
-     (expire_maker (Ok (((self_trade Expire_maker)) ((Step (now 1))))))
+     (expire_maker
+      (Ok (((self_trade Expire_maker) (book_liquidation ())) ((Step (now 1))))))
      (bad_header "Journal: unreadable header"))
     |}];
   let path = "test_journal_mismatch.bin" in
-  let journal = Journal.create ~header:{ self_trade = Cancel_both } path in
+  let journal =
+    Journal.create ~header:(Journal.Header.create ~self_trade:Cancel_both ()) path
+  in
   (match Journal.attach journal (Exchange.create ()) with
    | () -> print_endline "attached"
    | exception exn -> print_s [%sexp (exn : exn)]);
@@ -225,6 +230,7 @@ let%expect_test "default headers keep the original format" =
   [%expect
     {|
     ("Journal.attach: the exchange's self-trade policy differs from the header"
-     (self_trade Cancel_taker) (t.header ((self_trade Cancel_both))))
+     (self_trade Cancel_taker)
+     (t.header ((self_trade Cancel_both) (book_liquidation ()))))
     |}]
 ;;
