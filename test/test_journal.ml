@@ -149,3 +149,78 @@ let%expect_test "truncated and foreign files are errors" =
   print_s [%sexp (Journal.of_string "hello" : Input.t list Or_error.t)];
   [%expect {| (Error "Journal: missing magic string") |}]
 ;;
+
+let%expect_test "the self-trade policy travels in the header" =
+  let path = "test_journal_stp.bin" in
+  let self_trade : Order_book.Stp.t = Expire_maker in
+  let original = Exchange.create ~self_trade () in
+  let journal = Journal.create ~header:{ self_trade } path in
+  Journal.attach journal original;
+  let events = run original in
+  Journal.close journal;
+  let contents = In_channel.read_all path in
+  Stdlib.Sys.remove path;
+  let header, inputs = Journal.of_string_with_header contents |> ok_exn in
+  let replay ?header () = Exchange.drain_events (Journal.replay ?header inputs) in
+  let identical replayed =
+    [%equal: Sexp.t list] (event_sexps events) (event_sexps replayed)
+  in
+  let self_trade_cancels =
+    List.count events ~f:(function
+      | Order_cancelled { reason = Self_trade; _ } -> true
+      | _ -> false)
+  in
+  print_s
+    [%message
+      ""
+        ~magic:(String.prefix contents 8 : string)
+        (header : Journal.Header.t)
+        (self_trade_cancels : int)
+        ~with_header:(identical (replay ~header ()) : bool)
+        ~without_header:(identical (replay ()) : bool)];
+  [%expect
+    {|
+    ((magic EXJRNL02) (header ((self_trade Expire_maker)))
+     (self_trade_cancels 67) (with_header true) (without_header false))
+    |}]
+;;
+
+let%expect_test "default headers keep the original format" =
+  let inputs : Input.t list = [ Step { now = 1 } ] in
+  let plain = Journal.to_string inputs in
+  print_s
+    [%message
+      ""
+        ~same_bytes:
+          (String.equal plain (Journal.to_string ~header:Journal.Header.default inputs)
+           : bool)
+        ~magic:(String.prefix plain 8 : string)
+        ~expire_maker:
+          (Journal.of_string_with_header
+             (Journal.to_string ~header:{ self_trade = Expire_maker } inputs)
+           : (Journal.Header.t * Input.t list) Or_error.t)
+        ~bad_header:
+          (Journal.of_string_with_header (Journal.magic_with_header ^ "\255")
+           : (Journal.Header.t * Input.t list) Or_error.t)];
+  [%expect {|
+    ((same_bytes true) (magic EXJRNL01)
+     (expire_maker (Ok (((self_trade Expire_maker)) ((Step (now 1))))))
+     (bad_header
+      (Error
+       ("Journal: unreadable header"
+        (exn
+         (src/common.ml.Read_error
+          "Sum_tag / exchange-core/engine/journal.ml.Header.Wire.stp" 9))))))
+    |}];
+  let path = "test_journal_mismatch.bin" in
+  let journal = Journal.create ~header:{ self_trade = Cancel_both } path in
+  (match Journal.attach journal (Exchange.create ()) with
+   | () -> print_endline "attached"
+   | exception exn -> print_s [%sexp (exn : exn)]);
+  Journal.close journal;
+  Stdlib.Sys.remove path;
+  [%expect {|
+    ("Journal.attach: the exchange's self-trade policy differs from the header"
+     (self_trade Cancel_taker) (t.header ((self_trade Cancel_both))))
+    |}]
+;;
