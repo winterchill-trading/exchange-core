@@ -46,6 +46,18 @@ let samples : Input.t list =
   ; Set_mark { symbol = btc; px = px "101000" }
   ; Set_funding_rate { symbol = btc; rate = 0.0001 }
   ; Step { now = 3_600_000_000_000 }
+  ; Place_trigger
+      { account = a
+      ; request = Order_request.market ~reduce_only:true btc Sell ~size:(sz "0.01")
+      ; trigger = { trigger_px = px "95000"; kind = Stop_loss }
+      }
+  ; Modify_trigger
+      { account = a
+      ; target = Order_id (Order_id.of_int 9)
+      ; request = req
+      ; trigger = { trigger_px = px "99000"; kind = Take_profit }
+      }
+  ; Set_oracle { symbol = btc; px = px "100010" }
   ]
 ;;
 
@@ -76,5 +88,8 @@ let%expect_test "bin_prot round trip" =
     Set_mark                    14 bytes
     Set_funding_rate            13 bytes
     Step                        10 bytes
+    Place_trigger               69 bytes
+    Modify_trigger              80 bytes
+    Set_oracle                  14 bytes
     |}]
 ;;
