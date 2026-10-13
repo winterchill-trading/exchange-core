@@ -16,5 +16,8 @@ let () =
        ; Bench.Test.create
            ~name:"maker submit+cancel (100 resting)"
            (Scenario.maker_place_and_cancel ex)
+       ; Bench.Test.create
+           ~name:"submit+cancel (500 own resting)"
+           (Scenario.quoter_place_and_cancel (Scenario.create_quoter ()))
        ])
 ;;
