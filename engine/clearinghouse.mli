@@ -103,6 +103,10 @@ end
     charges fees. Returns [(taker, maker)]. *)
 val settle_fill : t -> Order_book.Fill.t -> Settlement.t * Settlement.t
 
+(** [settle_fill] returning an unboxed pair, for callers that would only take the tuple
+    apart. *)
+val settle_fill_u : t -> Order_book.Fill.t -> #(Settlement.t * Settlement.t)
+
 module Liquidation : sig
   type t =
     { account : Account.t

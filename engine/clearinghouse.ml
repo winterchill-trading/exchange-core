@@ -250,7 +250,7 @@ let settle_side t (fill : Order_book.Fill.t) ~account:account_id ~side ~crossed
   { account = account_id; side; crossed; fee; change }
 ;;
 
-let settle_fill t (fill : Order_book.Fill.t) =
+let settle_fill_u t (fill : Order_book.Fill.t) =
   let taker =
     settle_side t fill ~account:fill.taker ~side:fill.taker_side ~crossed:true
   in
@@ -262,6 +262,11 @@ let settle_fill t (fill : Order_book.Fill.t) =
       ~side:(Order_book.Fill.maker_side fill)
       ~crossed:false
   in
+  #(taker, maker)
+;;
+
+let settle_fill t fill =
+  let #(taker, maker) = settle_fill_u t fill in
   taker, maker
 ;;
 
