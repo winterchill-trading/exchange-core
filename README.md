@@ -82,6 +82,7 @@ protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs
 | `Event` | Log entries: order accepted/rejected/filled/cancelled, fill, liquidation, funding; `Event.Numbered` adds the sequence number |
 | `Price_index` | Oracle price and Hyperliquid's mark: median of oracle plus a 150 s average of the book's premium, the book's own prices and their 30 s average |
 | `Premium_funding` | Impact prices, the premium over the oracle, and the clamped, capped funding rate from its average |
+| `Book_liquidation` | Liquidation through the book with a backstop liquidator: settings and liquidation steps |
 | `Trigger_order`, `Trigger_event` | A trigger order waiting for the mark, and what happens to it (placed, triggered, cancelled), in a log of its own |
 | `Target` | The order a modify replaces: by order id or client order id (also `Exchange.Target`) |
 | `Exchange` | Top level: books per instrument, clearinghouse, marks, id counters, clock, event log; place (`place_with_order_id` also returns the assigned id), cancel, modify, views, `set_mark`, `funding_rate` / `set_funding_rate`, `step`, `drain_events` / `drain_numbered_events`, `record_inputs`, `apply` |
@@ -232,10 +233,17 @@ keep their format and an anchored run replays bit for bit.
   eighth per hour, capped at 4% an hour (`Premium_funding`, set with
   `Exchange.create ~premium_funding`). `Market_sim.Config.oracle_interval` publishes the
   reference walk as the oracle instead of the mark.
-- **Liquidation.** `set_mark` and `step` close every position of an account whose equity
-  is below maintenance margin at mark and cancel its resting orders. There is no
-  liquidator or backstop: the closed size leaves open interest, and losses beyond the
-  balance leave a negative balance.
+- **Liquidation.** `set_mark`, `set_oracle` and `step` close every position of an account
+  whose equity is below maintenance margin at mark and cancel its resting orders. There
+  is no liquidator or backstop: the closed size leaves open interest, and losses beyond
+  the balance leave a negative balance.
+- **Liquidation through the book** (`Exchange.create ~book_liquidation`, Hyperliquid's
+  scheme): the account's orders are cancelled, then each position gets a reduce-only
+  market order from the account to the book (20% of a position above 100,000 USDC, the
+  whole position within 30 s of a partial one); below two thirds of maintenance the
+  backstop moves the positions and the remaining balance to a liquidator account at the
+  mark. Steps come from `drain_liquidation_events`; journals record the setting in an
+  `EXJRNL03` header.
 - **Funding** is charged at each multiple of the funding interval (1 hour) crossed by
   `step`: every position pays `size * mark * rate`, so longs pay shorts when the rate is
   positive. The rate is per instrument (`set_funding_rate`, read back with
