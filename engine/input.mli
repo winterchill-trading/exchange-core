@@ -73,6 +73,16 @@ type t =
       { symbol : Symbol.t
       ; px : Price.t
       }
+  | Set_collar of
+      { symbol : Symbol.t
+      ; collar : Price_collar.Config.t option (** [None] removes the collar *)
+      }
+  | Set_halt_rule of { rule : Halt_rule.Config.t option }
+  | Set_session_reference of
+      { symbol : Symbol.t
+      ; px : Price.t
+      }
+  | Reopen of { symbol : Symbol.t option (** [None]: every halted symbol *) }
 [@@deriving sexp_of, compare, equal]
 
 include Binable.S with type t := t

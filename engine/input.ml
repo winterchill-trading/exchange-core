@@ -61,6 +61,16 @@ type t =
       { symbol : Symbol.t
       ; px : Price.t
       }
+  | Set_collar of
+      { symbol : Symbol.t
+      ; collar : Price_collar.Config.t option
+      }
+  | Set_halt_rule of { rule : Halt_rule.Config.t option }
+  | Set_session_reference of
+      { symbol : Symbol.t
+      ; px : Price.t
+      }
+  | Reopen of { symbol : Symbol.t option }
 [@@deriving sexp_of, compare, equal]
 
 (* The on-disk shape. Primitive types only, so the encoding is stable whatever the
@@ -124,6 +134,48 @@ module Wire = struct
     }
   [@@deriving bin_io]
 
+  type reference =
+    | Last_trade
+    | Mid
+    | Mark
+  [@@deriving bin_io]
+
+  type band =
+    | Bps of int
+    | Ticks of int
+  [@@deriving bin_io]
+
+  type action =
+    | Reject
+    | Reprice
+  [@@deriving bin_io]
+
+  type collar =
+    { reference : reference
+    ; band : band
+    ; action : action
+    }
+  [@@deriving bin_io]
+
+  type scope =
+    | Market_wide
+    | Per_symbol
+  [@@deriving bin_io]
+
+  type reopen =
+    | Automatic
+    | On_request
+  [@@deriving bin_io]
+
+  type halt_rule =
+    { levels : (int * int option) list
+    ; scope : scope
+    ; watch : string list
+    ; observe : reference
+    ; reopen : reopen
+    }
+  [@@deriving bin_io]
+
   type t =
     | Deposit of string * int
     | Set_leverage of string * string * int
@@ -138,6 +190,10 @@ module Wire = struct
     | Place_trigger of string * request * trigger
     | Modify_trigger of string * target * request * trigger
     | Set_oracle of string * int
+    | Set_collar of string * collar option
+    | Set_halt_rule of halt_rule option
+    | Set_session_reference of string * int
+    | Reopen of string option
   [@@deriving bin_io]
 end
 
@@ -255,6 +311,80 @@ let trigger_of_wire ({ trigger_px; kind } : Wire.trigger) : Trigger.t =
   }
 ;;
 
+let reference_to_wire : Price_collar.Reference.t -> Wire.reference = function
+  | Last_trade -> Last_trade
+  | Mid -> Mid
+  | Mark -> Mark
+;;
+
+let reference_of_wire : Wire.reference -> Price_collar.Reference.t = function
+  | Last_trade -> Last_trade
+  | Mid -> Mid
+  | Mark -> Mark
+;;
+
+let collar_to_wire ({ reference; band; action } : Price_collar.Config.t) : Wire.collar =
+  { reference = reference_to_wire reference
+  ; band =
+      (match band with
+       | Bps n -> Bps n
+       | Ticks n -> Ticks n)
+  ; action =
+      (match action with
+       | Reject -> Reject
+       | Reprice -> Reprice)
+  }
+;;
+
+let collar_of_wire ({ reference; band; action } : Wire.collar) : Price_collar.Config.t =
+  { reference = reference_of_wire reference
+  ; band =
+      (match band with
+       | Bps n -> Bps n
+       | Ticks n -> Ticks n)
+  ; action =
+      (match action with
+       | Reject -> Reject
+       | Reprice -> Reprice)
+  }
+;;
+
+let halt_rule_to_wire ({ levels; scope; watch; observe; reopen } : Halt_rule.Config.t)
+  : Wire.halt_rule
+  =
+  { levels = List.map levels ~f:(fun l -> l.move_bps, l.duration_ns)
+  ; scope =
+      (match scope with
+       | Market_wide -> Market_wide
+       | Per_symbol -> Per_symbol)
+  ; watch = List.map watch ~f:Symbol.to_string
+  ; observe = reference_to_wire observe
+  ; reopen =
+      (match reopen with
+       | Automatic -> Automatic
+       | On_request -> On_request)
+  }
+;;
+
+let halt_rule_of_wire ({ levels; scope; watch; observe; reopen } : Wire.halt_rule)
+  : Halt_rule.Config.t
+  =
+  { levels =
+      List.map levels ~f:(fun (move_bps, duration_ns) ->
+        { Halt_rule.Level.move_bps; duration_ns })
+  ; scope =
+      (match scope with
+       | Market_wide -> Market_wide
+       | Per_symbol -> Per_symbol)
+  ; watch = List.map watch ~f:Symbol.of_string
+  ; observe = reference_of_wire observe
+  ; reopen =
+      (match reopen with
+       | Automatic -> Automatic
+       | On_request -> On_request)
+  }
+;;
+
 let to_wire : t -> Wire.t =
   let a = Account.to_string in
   let s = Symbol.to_string in
@@ -286,6 +416,12 @@ let to_wire : t -> Wire.t =
     Modify_trigger
       (a account, target_to_wire target, request_to_wire request, trigger_to_wire trigger)
   | Set_oracle { symbol; px } -> Set_oracle (s symbol, Price.to_units px)
+  | Set_collar { symbol; collar } ->
+    Set_collar (s symbol, Option.map collar ~f:collar_to_wire)
+  | Set_halt_rule { rule } -> Set_halt_rule (Option.map rule ~f:halt_rule_to_wire)
+  | Set_session_reference { symbol; px } ->
+    Set_session_reference (s symbol, Price.to_units px)
+  | Reopen { symbol } -> Reopen (Option.map symbol ~f:s)
 ;;
 
 let of_wire : Wire.t -> t =
@@ -337,6 +473,12 @@ let of_wire : Wire.t -> t =
       ; trigger = trigger_of_wire trigger
       }
   | Set_oracle (symbol, px) -> Set_oracle { symbol = s symbol; px = Price.of_units px }
+  | Set_collar (symbol, collar) ->
+    Set_collar { symbol = s symbol; collar = Option.map collar ~f:collar_of_wire }
+  | Set_halt_rule rule -> Set_halt_rule { rule = Option.map rule ~f:halt_rule_of_wire }
+  | Set_session_reference (symbol, px) ->
+    Set_session_reference { symbol = s symbol; px = Price.of_units px }
+  | Reopen symbol -> Reopen { symbol = Option.map symbol ~f:s }
 ;;
 
 include
