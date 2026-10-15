@@ -15,7 +15,8 @@ venue's wire format; venue simulators are adapters over the engine.
 | `bench/` | `main` (core_bench) and `scenario/`, the 1000-account benchmark (see `bench/AGENTS.md`) |
 | `test/` | Expect tests, Quickcheck properties, allocation tests (see `test/AGENTS.md`) |
 | `.github/` | CI workflow and the shared obj-magic check (see `.github/AGENTS.md`) |
-| `README.md` | Packages, modules, journals and replay, anchoring, design notes, performance |
+| `README.md` | Packages, modules, journals and replay, anchoring, price collar and halts, design notes, performance |
+| `CHANGES.md` | Changes per release of both packages |
 | `exchange-core.opam`, `exchange-core-engine.opam`, `dune-project` | Two packages; edit `dune-project`, the `.opam` files are generated |
 
 ## Build, test, docs
@@ -55,6 +56,9 @@ yet on the org opam repository (see `../specs/repos/opam-repository.md`).
 - Allocation pins in `test/test_allocation.ml`: word counts differ between macOS arm64 and
   Linux amd64; keep the comment next to each pin current.
 - Comments for humans at non-obvious choices (margin, funding, liquidation order).
+- The workspace build reads every sibling's `dune` files, so one half-written sibling
+  breaks it. A private workspace of symlinks (`dune-workspace`, `dune-project`, and links
+  to `fixed-decimal`, `order-book`, `exchange-core`) built with `--root <dir>` avoids that.
 
 ## Dependencies and dependents
 
