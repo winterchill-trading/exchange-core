@@ -588,46 +588,60 @@ let halt_symbol t symbol ~until =
   count t (fun s -> { s with halts = s.halts + 1 })
 ;;
 
-(* Compares each watched symbol that is trading with its session reference (the first
-   price observed once a rule is set, unless [set_session_reference] gave one) and halts
-   on a new level. Runs at the end of every call that can move a price. *)
+(* Compares a watched symbol that is trading with its session reference (the first price
+   observed once a rule is set, unless [set_session_reference] gave one) and halts on a
+   new level. *)
+let check_halt_symbol t (rule : Halt_rule.Config.t) symbol =
+  if Halt_rule.watches rule symbol && not (Hashtbl.mem t.halts symbol)
+  then (
+    match reference_price t rule.observe symbol with
+    | None -> ()
+    | Some px ->
+      let reference =
+        match Hashtbl.find t.session_references symbol with
+        | Some reference -> reference
+        | None ->
+          Hashtbl.set t.session_references ~key:symbol ~data:px;
+          px
+      in
+      let triggered = Option.value (Hashtbl.find t.triggered_levels symbol) ~default:0 in
+      (match Halt_rule.level_to_trigger rule ~triggered ~reference ~px with
+       | None -> ()
+       | Some level ->
+         Hashtbl.set t.triggered_levels ~key:symbol ~data:(level + 1);
+         let { Halt_rule.Level.duration_ns; move_bps = _ } =
+           List.nth_exn rule.levels level
+         in
+         let until = Option.map duration_ns ~f:(fun d -> t.time + d) in
+         let move_bps = Halt_rule.move_bps ~reference ~px in
+         let targets =
+           match rule.scope with
+           | Per_symbol -> [ symbol ]
+           | Market_wide ->
+             List.map t.config.instruments ~f:(fun (i : Instrument.t) -> i.symbol)
+         in
+         List.iter targets ~f:(fun target ->
+           halt_symbol t target ~until;
+           emit_guard
+             t
+             target
+             (Halted { trigger_symbol = symbol; level; reference; px; move_bps; until }))))
+;;
+
+(* After a call that can move any price (marks, oracle, liquidations, steps). *)
 let check_halts t =
   match t.halt_rule with
   | None -> ()
   | Some rule ->
     List.iter t.config.instruments ~f:(fun (i : Instrument.t) ->
-      let symbol = i.symbol in
-      if Halt_rule.watches rule symbol && not (Hashtbl.mem t.halts symbol)
-      then
-        Option.iter (reference_price t rule.observe symbol) ~f:(fun px ->
-          let reference =
-            Hashtbl.find_or_add t.session_references symbol ~default:(fun () -> px)
-          in
-          let triggered =
-            Option.value (Hashtbl.find t.triggered_levels symbol) ~default:0
-          in
-          Option.iter
-            (Halt_rule.level_to_trigger rule ~triggered ~reference ~px)
-            ~f:(fun level ->
-              Hashtbl.set t.triggered_levels ~key:symbol ~data:(level + 1);
-              let { Halt_rule.Level.duration_ns; move_bps = _ } =
-                List.nth_exn rule.levels level
-              in
-              let until = Option.map duration_ns ~f:(fun d -> t.time + d) in
-              let move_bps = Halt_rule.move_bps ~reference ~px in
-              let targets =
-                match rule.scope with
-                | Per_symbol -> [ symbol ]
-                | Market_wide ->
-                  List.map t.config.instruments ~f:(fun (i : Instrument.t) -> i.symbol)
-              in
-              List.iter targets ~f:(fun target ->
-                halt_symbol t target ~until;
-                emit_guard
-                  t
-                  target
-                  (Halted
-                     { trigger_symbol = symbol; level; reference; px; move_bps; until })))))
+      check_halt_symbol t rule i.symbol)
+;;
+
+(* After an order in [symbol]: only its last trade and mid can have moved. *)
+let check_halt_after_order t symbol =
+  match t.halt_rule with
+  | None -> ()
+  | Some rule -> check_halt_symbol t rule symbol
 ;;
 
 let lift_halt t symbol =
@@ -992,7 +1006,7 @@ let place_internal t account req =
 
 let place_with_order_id t account request =
   let result = place_internal t account request in
-  check_halts t;
+  check_halt_after_order t request.symbol;
   record t (Place { account; request });
   result
 ;;
@@ -1188,7 +1202,7 @@ let modify_internal ?trigger t account (target : Target.t) (req : Order_request.
 
 let modify ?trigger t account target request =
   let status = modify_internal ?trigger t account target request in
-  check_halts t;
+  check_halt_after_order t request.symbol;
   (match trigger with
    | None -> record t (Modify { account; target; request })
    | Some trigger -> record t (Modify_trigger { account; target; request; trigger }));

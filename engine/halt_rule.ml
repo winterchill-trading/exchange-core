@@ -78,8 +78,17 @@ let move_bps ~reference ~px =
 
 let level_to_trigger (c : Config.t) ~triggered ~reference ~px =
   let move = move_bps ~reference ~px in
-  List.foldi c.levels ~init:None ~f:(fun i acc (l : Level.t) ->
-    if i >= triggered && move >= l.move_bps then Some i else acc)
+  (* Fast path, taken on almost every order: the move is below the next level. *)
+  let rec threshold (levels : Level.t list) i =
+    match levels with
+    | [] -> Int.max_value
+    | l :: rest -> if i = 0 then l.move_bps else threshold rest (i - 1)
+  in
+  if move < threshold c.levels triggered
+  then None
+  else
+    List.foldi c.levels ~init:None ~f:(fun i acc (l : Level.t) ->
+      if i >= triggered && move >= l.move_bps then Some i else acc)
 ;;
 
 let watches (c : Config.t) symbol =
