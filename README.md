@@ -91,6 +91,9 @@ protocol library (`hl-protocol` re-exports these types with Hyperliquid's codecs
 | `Journal` | Writes inputs to a binary file, loads them and replays them into a fresh exchange |
 | `Book_replay` | Rebuilds order books from numbered events alone (as a feed consumer would), with gap detection |
 | `Market_sim` | Seeded random-walk reference prices, marks, and noise traders posting, cancelling, quoting inside the spread and taking; `Config.randomize ~seed`; external reference prices (`set_reference`) and per-symbol noise trader counts (`set_noise_traders`) |
+| `Price_collar` | A per-symbol band around a reference price (last trade, mid or mark) in bps or ticks, and what happens to an aggressive order beyond it (reject or re-price) |
+| `Halt_rule` | Circuit-breaker levels (move from a session reference, halt duration), market-wide or per symbol, automatic or requested reopening |
+| `Guard_event` | Audit log of the collar and the halt rule (`drain_guard_events`), and their counters (`guard_stats`) |
 | `Stepped` | Deterministic stepped harness: exchange plus simulation advanced one step at a time, a strategy reacting to each step's events, every input recorded and checkable by replay |
 
 ```ocaml
@@ -181,6 +184,56 @@ creating and funding new traders as needed and cancelling the resting orders of 
 that stop. Both calls reach the exchange only through ordinary calls (`set_mark`,
 `deposit`, `cancel`, `place`), so they are recorded as existing `Input.t` values: journals
 keep their format and an anchored run replays bit for bit.
+
+## Price collar and halts
+
+A collar stops an aggressive order from trading more than a band away from a reference
+price, the guard real venues run as price banding or aberrant-trade protection. A halt
+rule is a venue-neutral circuit breaker. Both are off until set, and both are set through
+recorded calls, so journals carry them and a replay reproduces every guard event.
+
+```ocaml
+Exchange.set_collar ex btc
+  (Some { reference = Mark; band = Bps 50; action = Reprice });   (* or Ticks n, Reject *)
+Exchange.set_halt_rule ex (Some Halt_rule.Config.default);         (* 7%, 13%, 20% *)
+Exchange.set_session_reference ex btc px;                          (* new session *)
+Exchange.reopen ex;                                                (* lift every halt *)
+Exchange.drain_guard_events ex;  Exchange.guard_stats ex
+```
+
+- **Reference.** `Last_trade`, `Mid` (both sides present) or `Mark`. The mark is the last
+  `set_mark`, which is what `Market_sim.set_reference` feeds, so an anchored simulator
+  collars against the external market. Without a reference price the order passes and
+  `collar_unreferenced` counts it.
+- **Band.** `Bps n` of the reference or `Ticks n`; bounds are rounded inward to valid
+  prices (tick and significant figures), but never past the reference.
+- **Which orders.** Only orders that would trade on entry, and only on the aggressor's
+  side: a buy may not trade above `reference + band`, a sell not below
+  `reference - band`. A resting order that a moving reference left outside the band can
+  still fill, at a price better than the band for the aggressor, as on the venues that run
+  collars. Post-only orders and liquidation orders are not checked.
+- **Action.** `Reject` rejects a marketable limit order priced beyond the band
+  (`Rejected Invalid_price`, plus a `Collar_rejected` guard event with the reference and
+  the bound). `Reprice` moves its limit to the bound. Market orders are never rejected:
+  their protection price is clamped to the bound and they match as an IOC order there. A
+  `Collar_repriced` event is written only when the collar changed the outcome (part of
+  the order left unfilled while liquidity remained within its original limit).
+- **Halts.** Each watched symbol's price (mark, mid or last trade) is compared with its
+  session reference (`set_session_reference`, else the first price seen under the rule).
+  A move past an untriggered level halts the symbol, or every symbol (`Market_wide`), for
+  the level's duration; each level triggers once per session; the last level of the
+  default rule halts until `reopen`. While halted, orders that would trade are rejected
+  (`Rejected (Unsupported "trading halted")` plus `Halt_rejected`); passive orders rest and
+  cancels work, so the book can rebuild. Elapsed halts lift at the next `step`, or with
+  `Reopen.On_request` wait (`Reopen_pending`) for the front end to run its reopening
+  auction and call `reopen`. The TradFi simulators keep their own LULD bands.
+- **Compatibility.** Rejections reuse existing `Reject_reason` constructors and the guard
+  log is separate from `Event.t`, so front ends that match every constructor build
+  unchanged; the four new `Input` constructors are appended to the journal encoding.
+
+`test/test_collar_property.ml` checks with `Base_quickcheck`, over random order flow,
+references, bands and actions, that no fill happens beyond the collar on the aggressor's
+side.
 
 ## Design notes
 
@@ -329,6 +382,19 @@ Measured on arm64 (CI is amd64), time noisy within 10 to 20%; words are exact:
 | submit + cancel, 500 own resting | release | 44.4 us, 3359 w | 0.95 us, 378 w |
 | | release `-O3` | | 0.86 us, 323 w |
 
+With a collar and the default halt rule set (`collar+halt` in the bench), each order pays
+for a reference lookup, the bound and one halt comparison; the cases without them are
+unchanged (the pinned allocation counts did not move). Measured on arm64, 2 s quota:
+
+| Case | Build | No guard | Collar + halt rule |
+| --- | --- | --- | --- |
+| IOC buy + sell, 2 fills | dev | 2.75 us, 479 w | 2.97 us, 495 w |
+| | release | 2.73 us, 465 w | 2.87 us, 481 w |
+| | release `-O3` | 2.43 us, 369 w | 2.54 us, 385 w |
+| submit + cancel | release | 0.85 us, 338 w | 0.94 us, 346 w |
+| | release `-O3` | 0.77 us, 286 w | 0.84 us, 294 w |
+| step, 1000 accounts | release | 68 us, 20 w | (unchanged) |
+
 The cache costs a few words per submit (about 15 on the IOC round trip) and makes the
 check independent of how many orders the account has resting. The remaining submit words
 are mostly its outputs: events, settlements, executions and
@@ -339,8 +405,10 @@ the fill history.
 `dune test` runs expect tests (instrument rules, fees, PnL, liquidation, funding,
 exchange flows, a seeded market simulation, pinned and mean-reverting reference prices,
 per-symbol noise trader counts, a text trace of book, margin and accounts per step,
-journal round trips and replays, books rebuilt from events, the stepped harness) and
+journal round trips and replays, books rebuilt from events, the stepped harness, collar
+bands, rejections and re-pricing, market-wide and per-symbol halts and their replays) and
 `Base_quickcheck` properties: balances plus unrealised PnL plus fees are conserved, books
 never cross, and every resting order is listed once in its owner's open orders; with
 steps and mark moves mixed in, positions net to zero once liquidated sizes
-are counted, and order and trade ids are unique.
+are counted, and order and trade ids are unique; with a collar, no fill beyond it on the
+aggressor's side.
