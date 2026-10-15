@@ -228,13 +228,72 @@ val funding_rate : t -> Symbol.t -> float
     every funding boundary crossed, then liquidates under-margined accounts. *)
 val step : t -> now:int -> unit
 
+(** {2 Price collar and halts}
+
+    A collar ({!Price_collar}) limits how far from a reference price an aggressive order
+    in its symbol may trade: such an order is rejected ([Rejected Invalid_price], with a
+    [Collar_rejected] guard event carrying the reference and the bound) or re-priced to
+    the bound. Market orders are never rejected by a collar; their protection price is
+    clamped to the bound and they match as an IOC order at it. Liquidation orders are
+    exempt.
+
+    A halt rule ({!Halt_rule}) halts trading in one symbol or in all of them when a
+    watched symbol moves a level's threshold away from its session reference. While a
+    symbol is halted, an order that would trade on entry is rejected
+    ([Rejected (Unsupported "trading halted")] and a [Halt_rejected] guard event); passive
+    orders rest, and cancels work. Halts are checked at the end of every call that can
+    move a price ([place], [modify], [place_trigger], [set_mark], [set_oracle], [step]);
+    elapsed halts are lifted at the start of [step].
+
+    Both are configured through recorded calls, so journals carry them and replays
+    reproduce the guard events. Neither changes anything until it is set: an exchange
+    without a collar or a halt rule behaves, and replays, exactly as before. *)
+
+(** Sets or removes ([None]) the symbol's collar. An error for an unknown symbol or an
+    invalid band (the call is still recorded, as for {!set_leverage}). *)
+val set_collar : t -> Symbol.t -> Price_collar.Config.t option -> unit Or_error.t
+
+val collar : t -> Symbol.t -> Price_collar.Config.t option
+
+(** The symbol's collar reference price now, if it has a collar and the price exists. *)
+val collar_reference : t -> Symbol.t -> Price.t option
+
+(** Sets or removes the halt rule. Removing it lifts no halt in force ({!reopen} does). *)
+val set_halt_rule : t -> Halt_rule.Config.t option -> unit Or_error.t
+
+val halt_rule : t -> Halt_rule.Config.t option
+
+(** Starts a session for the symbol: its moves are measured from [px] and every level can
+    trigger again. Without a call, the first price observed under a halt rule is the
+    reference. *)
+val set_session_reference : t -> Symbol.t -> Price.t -> unit
+
+val session_reference : t -> Symbol.t -> Price.t option
+
+(** Lifts the halt of [symbol] (default: every halted symbol), whether or not its duration
+    has elapsed, with a [Reopened] guard event. The hook for a front end that runs a
+    reopening auction: with [Reopen.On_request] halts wait for this call. *)
+val reopen : ?symbol:Symbol.t -> t -> unit
+
+(** [None] when the symbol is trading. *)
+val halt_status
+  :  t
+  -> Symbol.t
+  -> [ `Until of int | `Until_reopen | `Reopen_pending ] option
+
+(** Returns the guard events since the previous call, oldest first, and forgets them. *)
+val drain_guard_events : t -> Guard_event.t list
+
+val guard_stats : t -> Guard_event.Stats.t
+
 (** {2 Inputs}
 
     Every call above that changes the exchange ([deposit], [set_leverage], [place],
     [place_with_order_id], [reject], [cancel], [cancel_by_client_order_id], [modify],
-    [place_trigger], [set_mark], [set_oracle], [set_funding_rate], [step]) is reported to
-    the input recorders as an {!Input.t} once it has been performed. Changes made directly
-    through {!clearinghouse} or {!book} are not. *)
+    [place_trigger], [set_mark], [set_oracle], [set_funding_rate], [step], [set_collar],
+    [set_halt_rule], [set_session_reference], [reopen]) is reported to the input recorders
+    as an {!Input.t} once it has been performed. Changes made directly through
+    {!clearinghouse} or {!book} are not. *)
 
 (** Adds a recorder, called after every mutating call with the request it performed.
     Recorders are called in the order they were added. *)

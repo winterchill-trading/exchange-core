@@ -73,6 +73,14 @@ module Premiums = struct
   let average t = if t.count = 0 then 0. else t.sum /. Float.of_int t.count
 end
 
+(* A halted symbol. [until] is [None] for a halt that waits for [reopen]. *)
+module Halt = struct
+  type t =
+    { mutable until : int option
+    ; mutable pending : bool (** elapsed, waiting for [reopen] *)
+    }
+end
+
 type t =
   { config : Config.t
   ; premium_funding : Premium_funding.Config.t
@@ -102,6 +110,14 @@ type t =
   ; mutable next_oid : int
   ; next_tid : unit -> Trade_id.t (** built once so a submit does not allocate it *)
   ; mutable next_funding : int
+  ; collars : Price_collar.Config.t Symbol.Table.t
+  ; mutable halt_rule : Halt_rule.Config.t option
+  ; session_references : Price.t Symbol.Table.t
+  ; triggered_levels : int Symbol.Table.t (** levels triggered this session *)
+  ; halts : Halt.t Symbol.Table.t
+  ; guard_events : Guard_event.t Queue.t
+  ; mutable guard_stats : Guard_event.Stats.t
+  ; mutable last_unfilled : bool (** the last submit left part of its order unfilled *)
   }
 
 let create
@@ -149,6 +165,14 @@ let create
   ; next_oid = 1
   ; next_tid
   ; next_funding = config.funding_interval_ns
+  ; collars = Symbol.Table.create ()
+  ; halt_rule = None
+  ; session_references = Symbol.Table.create ()
+  ; triggered_levels = Symbol.Table.create ()
+  ; halts = Symbol.Table.create ()
+  ; guard_events = Queue.create ()
+  ; guard_stats = Guard_event.Stats.zero
+  ; last_unfilled = false
   }
 ;;
 
@@ -443,6 +467,191 @@ let next_order_id t =
   order_id
 ;;
 
+(* Price collar and halts *)
+
+let emit_guard ?account ?order_id t symbol kind =
+  Queue.enqueue
+    t.guard_events
+    { Guard_event.symbol
+    ; account
+    ; order_id
+    ; kind
+    ; time = t.time
+    ; before_seq = t.next_seq
+    }
+;;
+
+let count t f = t.guard_stats <- f t.guard_stats
+
+let reference_price t (reference : Price_collar.Reference.t) symbol =
+  match reference with
+  | Last_trade -> Hashtbl.find t.last_trade symbol
+  | Mid -> Option.bind (book t symbol) ~f:Order_book.mid
+  | Mark -> mark t symbol
+;;
+
+(* Whether an order at [px] would trade on entry. *)
+let marketable book ~(side : Side.t) ~px =
+  match side with
+  | Buy ->
+    (match Order_book.best_ask_or_null book with
+     | Null -> false
+     | This ask -> Price.( <= ) ask px)
+  | Sell ->
+    (match Order_book.best_bid_or_null book with
+     | Null -> false
+     | This bid -> Price.( >= ) bid px)
+;;
+
+let halted t symbol = (not (Hashtbl.is_empty t.halts)) && Hashtbl.mem t.halts symbol
+
+let halt_reject t account ~symbol ~order_id ~client_order_id ~side =
+  emit_guard t symbol ~account ~order_id (Halt_rejected { side });
+  count t (fun s -> { s with halt_rejected = s.halt_rejected + 1 });
+  emit_reject t account ~symbol ~order_id ?client_order_id (Unsupported "trading halted")
+;;
+
+type collar_decision =
+  | Pass
+  | Reject_collar of
+      { reference : Price.t
+      ; bound : Price.t
+      }
+  | Reprice of
+      { reference : Price.t
+      ; bound : Price.t
+      }
+
+(* The collar's verdict on an aggressive order at [px]. Market orders are never rejected
+   by the collar: their protection price is clamped instead. The common case, no collar
+   anywhere, is one emptiness check. *)
+let collar_decision t (instrument : Instrument.t) ~side ~px ~market =
+  if Hashtbl.is_empty t.collars
+  then Pass
+  else (
+    match Hashtbl.find t.collars instrument.symbol with
+    | None -> Pass
+    | Some (c : Price_collar.Config.t) ->
+      (match reference_price t c.reference instrument.symbol with
+       | None ->
+         count t (fun s -> { s with collar_unreferenced = s.collar_unreferenced + 1 });
+         Pass
+       | Some reference ->
+         let bound = Price_collar.bound c instrument ~reference ~side in
+         if (not (Price_collar.beyond ~side ~limit:px ~bound))
+            || not (marketable (Option.value_exn (book t instrument.symbol)) ~side ~px)
+         then Pass
+         else (
+           match c.action, market with
+           | Reject, false -> Reject_collar { reference; bound }
+           | Reject, true | Reprice, _ -> Reprice { reference; bound })))
+;;
+
+let collar_reject t account ~symbol ~order_id ~client_order_id ~side ~px ~reference ~bound
+  =
+  emit_guard
+    t
+    symbol
+    ~account
+    ~order_id
+    (Collar_rejected { side; limit_px = px; reference; bound });
+  count t (fun s -> { s with collar_rejected = s.collar_rejected + 1 });
+  emit_reject t account ~symbol ~order_id ?client_order_id Invalid_price
+;;
+
+(* After a re-priced order has matched: it is audited only if the collar changed the
+   outcome, i.e. part of it is unfilled while opposite liquidity is left within its
+   original limit. *)
+let note_reprice t account ~symbol ~order_id ~side ~limit_px ~repriced_px ~reference =
+  let book = Option.value_exn (book t symbol) in
+  if t.last_unfilled && marketable book ~side ~px:limit_px
+  then (
+    emit_guard
+      t
+      symbol
+      ~account
+      ~order_id
+      (Collar_repriced { side; limit_px; repriced_px; reference });
+    count t (fun s -> { s with collar_repriced = s.collar_repriced + 1 }))
+;;
+
+let halt_symbol t symbol ~until =
+  (match Hashtbl.find t.halts symbol with
+   | Some (h : Halt.t) ->
+     (* Already halted: the longer halt wins. *)
+     h.until
+     <- (match h.until, until with
+         | None, _ | _, None -> None
+         | Some a, Some b -> Some (Int.max a b));
+     h.pending <- false
+   | None -> Hashtbl.set t.halts ~key:symbol ~data:{ Halt.until; pending = false });
+  count t (fun s -> { s with halts = s.halts + 1 })
+;;
+
+(* Compares each watched symbol that is trading with its session reference (the first
+   price observed once a rule is set, unless [set_session_reference] gave one) and halts
+   on a new level. Runs at the end of every call that can move a price. *)
+let check_halts t =
+  match t.halt_rule with
+  | None -> ()
+  | Some rule ->
+    List.iter t.config.instruments ~f:(fun (i : Instrument.t) ->
+      let symbol = i.symbol in
+      if Halt_rule.watches rule symbol && not (Hashtbl.mem t.halts symbol)
+      then
+        Option.iter (reference_price t rule.observe symbol) ~f:(fun px ->
+          let reference =
+            Hashtbl.find_or_add t.session_references symbol ~default:(fun () -> px)
+          in
+          let triggered =
+            Option.value (Hashtbl.find t.triggered_levels symbol) ~default:0
+          in
+          Option.iter
+            (Halt_rule.level_to_trigger rule ~triggered ~reference ~px)
+            ~f:(fun level ->
+              Hashtbl.set t.triggered_levels ~key:symbol ~data:(level + 1);
+              let { Halt_rule.Level.duration_ns; move_bps = _ } =
+                List.nth_exn rule.levels level
+              in
+              let until = Option.map duration_ns ~f:(fun d -> t.time + d) in
+              let move_bps = Halt_rule.move_bps ~reference ~px in
+              let targets =
+                match rule.scope with
+                | Per_symbol -> [ symbol ]
+                | Market_wide ->
+                  List.map t.config.instruments ~f:(fun (i : Instrument.t) -> i.symbol)
+              in
+              List.iter targets ~f:(fun target ->
+                halt_symbol t target ~until;
+                emit_guard
+                  t
+                  target
+                  (Halted
+                     { trigger_symbol = symbol; level; reference; px; move_bps; until })))))
+;;
+
+let lift_halt t symbol =
+  Hashtbl.remove t.halts symbol;
+  emit_guard t symbol Reopened;
+  count t (fun s -> { s with reopens = s.reopens + 1 })
+;;
+
+(* Halts whose duration has elapsed, in universe order: lifted, or with
+   [Reopen.On_request] left pending for [reopen]. *)
+let expire_halts t =
+  if not (Hashtbl.is_empty t.halts)
+  then
+    List.iter t.config.instruments ~f:(fun (i : Instrument.t) ->
+      match Hashtbl.find t.halts i.symbol with
+      | Some { until = Some until; pending = false } as h when until <= t.time ->
+        (match t.halt_rule with
+         | Some { reopen = On_request; _ } ->
+           Option.iter h ~f:(fun h -> h.pending <- true);
+           emit_guard t i.symbol Reopen_pending
+         | Some { reopen = Automatic; _ } | None -> lift_halt t i.symbol)
+      | Some _ | None -> ())
+;;
+
 (* Runs [submit] with [order_id] and turns the book's result into an order status,
    emitting events and settling fills. *)
 let submit
@@ -460,6 +669,7 @@ let submit
   =
   let book = Option.value_exn (book t symbol) in
   let r = submit ~oid:order_id ~next_tid:t.next_tid in
+  t.last_unfilled <- not (Size.is_zero r.remaining);
   List.iter r.fills ~f:(record_fill t book);
   (* Before the taker's own events, so a consumer rebuilding the book from events never
      sees the taker rest across its expired order. *)
@@ -562,7 +772,7 @@ let pre_trade_checks t account (instrument : Instrument.t) ~side ~px ~sz ~reduce
   sz
 ;;
 
-let place_limit
+let place_limit_at
   t
   account
   (instrument : Instrument.t)
@@ -573,44 +783,144 @@ let place_limit
   =
   let symbol = instrument.symbol in
   let cid = req.client_order_id in
+  match
+    pre_trade_checks
+      t
+      account
+      instrument
+      ~side:req.side
+      ~px
+      ~sz:req.size
+      ~reduce_only:req.reduce_only
+      ~cid
+  with
+  | Error reason -> emit_reject t account ~symbol ~order_id ?client_order_id:cid reason
+  | Ok sz ->
+    submit
+      t
+      account
+      ~symbol
+      ~side:req.side
+      ~limit_px:px
+      ~order_id
+      ~client_order_id:cid
+      ~submit:(fun ~oid ~next_tid ->
+        Order_book.add_limit
+          (Option.value_exn (book t symbol))
+          ~oid
+          ~owner:account
+          ~side:req.side
+          ~px
+          ~sz
+          ~tif
+          ~reduce_only:req.reduce_only
+          ?cloid:cid
+          ~time:t.time
+          ~next_tid
+          ())
+;;
+
+let place_limit
+  t
+  account
+  (instrument : Instrument.t)
+  (req : Order_request.t)
+  ~order_id
+  ~px
+  ~(tif : Tif.t)
+  =
+  let symbol = instrument.symbol in
+  let cid = req.client_order_id in
+  let side = req.side in
   if not (Instrument.valid_price instrument px)
   then emit_reject t account ~symbol ~order_id ?client_order_id:cid Invalid_price
   else (
-    match
-      pre_trade_checks
-        t
-        account
-        instrument
-        ~side:req.side
-        ~px
-        ~sz:req.size
-        ~reduce_only:req.reduce_only
-        ~cid
-    with
-    | Error reason -> emit_reject t account ~symbol ~order_id ?client_order_id:cid reason
-    | Ok sz ->
-      submit
-        t
-        account
-        ~symbol
-        ~side:req.side
-        ~limit_px:px
-        ~order_id
-        ~client_order_id:cid
-        ~submit:(fun ~oid ~next_tid ->
-          Order_book.add_limit
-            (Option.value_exn (book t symbol))
-            ~oid
-            ~owner:account
-            ~side:req.side
-            ~px
-            ~sz
-            ~tif
-            ~reduce_only:req.reduce_only
-            ?cloid:cid
-            ~time:t.time
-            ~next_tid
-            ()))
+    (* Post-only orders never trade on entry: neither the halt nor the collar applies. *)
+    let passive =
+      match tif with
+      | Alo -> true
+      | Gtc | Ioc -> false
+    in
+    if (not passive)
+       && halted t symbol
+       && marketable (Option.value_exn (book t symbol)) ~side ~px
+    then halt_reject t account ~symbol ~order_id ~client_order_id:cid ~side
+    else (
+      match
+        if passive then Pass else collar_decision t instrument ~side ~px ~market:false
+      with
+      | Pass -> place_limit_at t account instrument req ~order_id ~px ~tif
+      | Reject_collar { reference; bound } ->
+        collar_reject
+          t
+          account
+          ~symbol
+          ~order_id
+          ~client_order_id:cid
+          ~side
+          ~px
+          ~reference
+          ~bound
+      | Reprice { reference; bound } ->
+        let status = place_limit_at t account instrument req ~order_id ~px:bound ~tif in
+        note_reprice
+          t
+          account
+          ~symbol
+          ~order_id
+          ~side
+          ~limit_px:px
+          ~repriced_px:bound
+          ~reference;
+        status))
+;;
+
+let place_market_at
+  t
+  account
+  (instrument : Instrument.t)
+  (req : Order_request.t)
+  ~order_id
+  ~slippage_bps
+  ~limit_px
+  =
+  let symbol = instrument.symbol in
+  let cid = req.client_order_id in
+  let b = Option.value_exn (book t symbol) in
+  match
+    pre_trade_checks
+      t
+      account
+      instrument
+      ~side:req.side
+      ~px:limit_px
+      ~sz:req.size
+      ~reduce_only:req.reduce_only
+      ~cid
+  with
+  | Error reason -> emit_reject t account ~symbol ~order_id ?client_order_id:cid reason
+  | Ok sz ->
+    submit
+      t
+      account
+      ~symbol
+      ~side:req.side
+      ~limit_px
+      ~order_id
+      ~client_order_id:cid
+      ~submit:(fun ~oid ~next_tid ->
+        Order_book.market
+          b
+          ~oid
+          ~owner:account
+          ~side:req.side
+          ~sz
+          ~slippage_bps
+          ~reduce_only:req.reduce_only
+          ?cloid:cid
+          ~time:t.time
+          ~next_tid
+          ())
 ;;
 
 let place_market
@@ -627,41 +937,27 @@ let place_market
   let b = Option.value_exn (book t symbol) in
   match Order_book.market_limit_px b ~side:req.side ~slippage_bps with
   | None -> emit_reject t account ~symbol ~order_id ?client_order_id:cid No_liquidity
+  | Some _ when halted t symbol ->
+    halt_reject t account ~symbol ~order_id ~client_order_id:cid ~side:req.side
   | Some limit_px ->
-    (match
-       pre_trade_checks
-         t
-         account
-         instrument
-         ~side:req.side
-         ~px:limit_px
-         ~sz:req.size
-         ~reduce_only:req.reduce_only
-         ~cid
-     with
-     | Error reason -> emit_reject t account ~symbol ~order_id ?client_order_id:cid reason
-     | Ok sz ->
-       submit
+    (match collar_decision t instrument ~side:req.side ~px:limit_px ~market:true with
+     | Pass -> place_market_at t account instrument req ~order_id ~slippage_bps ~limit_px
+     | Reject_collar { reference; bound } | Reprice { reference; bound } ->
+       (* The protection price is clamped to the band: an IOC limit order at the bound,
+          which is what a market order is. *)
+       let status =
+         place_limit_at t account instrument req ~order_id ~px:bound ~tif:Ioc
+       in
+       note_reprice
          t
          account
          ~symbol
+         ~order_id
          ~side:req.side
          ~limit_px
-         ~order_id
-         ~client_order_id:cid
-         ~submit:(fun ~oid ~next_tid ->
-           Order_book.market
-             b
-             ~oid
-             ~owner:account
-             ~side:req.side
-             ~sz
-             ~slippage_bps
-             ~reduce_only:req.reduce_only
-             ?cloid:cid
-             ~time:t.time
-             ~next_tid
-             ()))
+         ~repriced_px:bound
+         ~reference;
+       status)
 ;;
 
 let place_with_id t account (req : Order_request.t) ~order_id : Order_status.t =
@@ -696,6 +992,7 @@ let place_internal t account req =
 
 let place_with_order_id t account request =
   let result = place_internal t account request in
+  check_halts t;
   record t (Place { account; request });
   result
 ;;
@@ -819,6 +1116,7 @@ let place_trigger_internal t account req trigger =
 
 let place_trigger t account request trigger =
   let result = place_trigger_internal t account request trigger in
+  check_halts t;
   record t (Place_trigger { account; request; trigger });
   result
 ;;
@@ -890,6 +1188,7 @@ let modify_internal ?trigger t account (target : Target.t) (req : Order_request.
 
 let modify ?trigger t account target request =
   let status = modify_internal ?trigger t account target request in
+  check_halts t;
   (match trigger with
    | None -> record t (Modify { account; target; request })
    | Some trigger -> record t (Modify_trigger { account; target; request; trigger }));
@@ -1094,6 +1393,7 @@ let set_mark t symbol px =
   Hashtbl.set t.marks ~key:symbol ~data:px;
   liquidate t;
   fire_triggers t;
+  check_halts t;
   record t (Set_mark { symbol; px })
 ;;
 
@@ -1197,6 +1497,7 @@ let set_oracle_internal t symbol px =
 
 let set_oracle t symbol px =
   set_oracle_internal t symbol px;
+  check_halts t;
   record t (Set_oracle { symbol; px })
 ;;
 
@@ -1219,10 +1520,88 @@ let step t ~now =
       t.next_funding <- t.next_funding + t.config.funding_interval_ns)
   done;
   t.time <- now;
+  expire_halts t;
   liquidate t;
   fire_triggers t;
+  check_halts t;
   record t (Step { now })
 ;;
+
+(* Collar and halt settings *)
+
+let set_collar t symbol collar =
+  let result =
+    match instrument t symbol, collar with
+    | None, _ -> Or_error.error_s [%message "Unknown symbol" (symbol : Symbol.t)]
+    | Some _, None ->
+      Hashtbl.remove t.collars symbol;
+      Ok ()
+    | Some _, Some c ->
+      Or_error.map (Price_collar.Config.validate c) ~f:(fun () ->
+        Hashtbl.set t.collars ~key:symbol ~data:c)
+  in
+  record t (Set_collar { symbol; collar });
+  result
+;;
+
+let collar t symbol = Hashtbl.find t.collars symbol
+
+let collar_reference t symbol =
+  Option.bind (collar t symbol) ~f:(fun (c : Price_collar.Config.t) ->
+    reference_price t c.reference symbol)
+;;
+
+let set_halt_rule t rule =
+  let result =
+    match rule with
+    | None ->
+      t.halt_rule <- None;
+      Ok ()
+    | Some r ->
+      Or_error.map (Halt_rule.Config.validate r) ~f:(fun () -> t.halt_rule <- Some r)
+  in
+  check_halts t;
+  record t (Set_halt_rule { rule });
+  result
+;;
+
+let halt_rule t = t.halt_rule
+
+let set_session_reference t symbol px =
+  Hashtbl.set t.session_references ~key:symbol ~data:px;
+  Hashtbl.remove t.triggered_levels symbol;
+  check_halts t;
+  record t (Set_session_reference { symbol; px })
+;;
+
+let session_reference t symbol = Hashtbl.find t.session_references symbol
+
+let reopen ?symbol t =
+  (match symbol with
+   | Some symbol -> if Hashtbl.mem t.halts symbol then lift_halt t symbol
+   | None ->
+     List.iter t.config.instruments ~f:(fun (i : Instrument.t) ->
+       if Hashtbl.mem t.halts i.symbol then lift_halt t i.symbol));
+  check_halts t;
+  record t (Reopen { symbol })
+;;
+
+let halt_status t symbol =
+  Hashtbl.find t.halts symbol
+  |> Option.map ~f:(fun (h : Halt.t) ->
+    match h.pending, h.until with
+    | true, _ -> `Reopen_pending
+    | false, Some until -> `Until until
+    | false, None -> `Until_reopen)
+;;
+
+let drain_guard_events t =
+  let events = Queue.to_list t.guard_events in
+  Queue.clear t.guard_events;
+  events
+;;
+
+let guard_stats t = t.guard_stats
 
 let apply t (input : Input.t) =
   match input with
@@ -1246,4 +1625,8 @@ let apply t (input : Input.t) =
   | Modify_trigger { account; target; request; trigger } ->
     ignore (modify ~trigger t account target request : Order_status.t)
   | Set_oracle { symbol; px } -> set_oracle t symbol px
+  | Set_collar { symbol; collar } -> ignore (set_collar t symbol collar : unit Or_error.t)
+  | Set_halt_rule { rule } -> ignore (set_halt_rule t rule : unit Or_error.t)
+  | Set_session_reference { symbol; px } -> set_session_reference t symbol px
+  | Reopen { symbol } -> reopen ?symbol t
 ;;
