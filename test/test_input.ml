@@ -58,6 +58,16 @@ let samples : Input.t list =
       ; trigger = { trigger_px = px "99000"; kind = Take_profit }
       }
   ; Set_oracle { symbol = btc; px = px "100010" }
+  ; Set_collar
+      { symbol = btc
+      ; collar = Some { reference = Mark; band = Bps 50; action = Reprice }
+      }
+  ; Set_collar { symbol = btc; collar = None }
+  ; Set_halt_rule { rule = Some Halt_rule.Config.default }
+  ; Set_halt_rule { rule = None }
+  ; Set_session_reference { symbol = btc; px = px "100000" }
+  ; Reopen { symbol = Some btc }
+  ; Reopen { symbol = None }
   ]
 ;;
 
@@ -91,5 +101,12 @@ let%expect_test "bin_prot round trip" =
     Place_trigger               69 bytes
     Modify_trigger              80 bytes
     Set_oracle                  14 bytes
+    Set_collar                  10 bytes
+    Set_collar                   6 bytes
+    Set_halt_rule               37 bytes
+    Set_halt_rule                2 bytes
+    Set_session_reference       14 bytes
+    Reopen                       6 bytes
+    Reopen                       2 bytes
     |}]
 ;;
